@@ -1,0 +1,13 @@
+# Store every text file with LF in the repository, and check it out with LF.
+# Without this, a machine with core.autocrlf=true rewrites the working tree to CRLF
+# and Git reports whole files as modified - a diff that says everything changed when
+# nothing did. Editors that insist on CRLF are still fine: Git normalises on commit,
+# so the stored bytes stay LF either way.
+* text=auto eol=lf
+
+# Redundant on purpose, and do NOT relax it: this hook is executed by sh (Git Bash).
+# A CR at the end of each line makes sh fail with "bad interpreter" or
+# "command not found", and the failure looks nothing like a line-ending problem.
+graph-servers/post-commit text eol=lf
+
+# PowerShell reads LF without complaint, so the scripts need no exception.
