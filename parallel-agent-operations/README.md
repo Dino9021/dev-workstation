@@ -37,6 +37,26 @@ Point 3 is the expensive one. A batch that dies at 80% completion does not deliv
 | **Report the ceiling, then wait for an actual reply** | The spending decision moves to the person who can see the balance |
 | **Model tiering** — haiku for mechanical subtasks | The same allowance stretches across more agents |
 | **A progress file + one output file per agent** | An interrupted batch resumes instead of restarting. This is what turns "budget gone, nothing to show" into "budget gone, keep what finished" |
+| **Offer the prompts as a file, then stop and ask again** | Lets the work run on a *different* account's allowance — see below |
+
+## Running the batch on another account | 用別的帳號額度來跑
+
+The rule requires the pre-dispatch report to **end** by offering to write every agent prompt into one `.md` file. That single question unlocks a way out of the budget problem entirely:
+
+1. The supervisor writes `.agent-tasks/<YYYYMMDD-HHMMSS-task-name>/prompts.md`.
+2. **It stops and asks again** — writing the prompts is not permission to dispatch. The owner may want to run all of them elsewhere, some of them, or none yet.
+3. The owner runs whichever prompts they like under **another account, another model, or another tool entirely**.
+4. Each prompt already ends with an explicit instruction to write its report to `.agent-tasks/<same-folder>/agent-NN-<subtask>.md`.
+5. The supervisor reads those files back and consolidates. Items handed over are marked `delegated` in `progress.md`, so a later session can tell "waiting on the owner" apart from "failed".
+
+**The filesystem is the handoff.** Nothing has to be pasted back into the conversation, and the executing agent needs no access to it.
+
+Two details decide whether this works at all, and both are hard requirements in the snippet:
+
+- **Each prompt must stand completely alone.** The agent running it has none of the originating conversation — no "as discussed", no implicit paths. Everything it needs goes in the prompt body.
+- **Each prompt must name its output path.** Without that line the results land in some other chat window and the supervisor never sees them, which wastes the exercise entirely.
+
+規則要求派遣前報告的**最後一句**必須問「要不要先把所有提示詞寫成一個 md 檔」。這一問就打開了繞過額度限制的路：主控寫出 `prompts.md` → **停下再問一次**（寫完提示詞不等於可以開工）→ 擁有者拿去用別的帳號、別的模型甚至別的工具執行 → 每段提示詞結尾都已指定把報告寫進同一個任務資料夾 → 主控讀檔統整，交出去的項目在 `progress.md` 標成 `delegated`。**檔案系統就是交接點。** 兩個硬性要求決定這件事成不成立：每段提示詞必須能單獨成立（執行它的代理沒有原始對話），以及每段提示詞都必須指定輸出路徑（否則結果落在主控讀不到的地方）。
 
 ## Where it came from | 緣由
 
