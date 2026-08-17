@@ -25,7 +25,7 @@
 
 ## 0. 兩台伺服器各管什麼
 
-**兩台都不是永遠的第一順位。** 依問題性質選工具，不要有預設偏好。建議把這張分工表寫進你自己專案的 `CLAUDE.md` / `AGENTS.md`，AI 助手才會照著選。
+**兩台都不是永遠的第一順位。** 依問題性質選工具，不要有預設偏好。這張表要寫進你專案的 `CLAUDE.md` / `AGENTS.md`，AI 助手才會照著選 —— 可直接貼的版本在 [`claude-md-snippet.md`](claude-md-snippet.md)（做法見第 6.4 節）。
 
 | | code-review-graph | GitNexus |
 |---|---|---|
@@ -42,12 +42,15 @@
 
 ## 1. 前置需求
 
-| 需求 | 最低版本 | 本機實測版本 |
-|---|---|---|
-| Node.js + npm | 未宣告；用 LTS | node 24.18.0 / npm 12.0.1 |
-| Python | **3.10 以上**（套件宣告） | 3.14.6 |
-| Git for Windows | —— | 內含 Git Bash，`post-commit` hook 需要 |
-| Claude Code | —— | 2.1.228 |
+| 需求 | 最低版本 | 下限的來源 | 本機實測版本 |
+|---|---|---|---|
+| Node.js | **22.0.0 以上** | gitnexus 的 `package.json` → `engines.node: ">=22.0.0"` | 24.18.0 |
+| npm | 隨 Node 附帶 | —— | 12.0.1 |
+| Python | **3.10 以上** | code-review-graph 的 `Requires-Python: >=3.10` | 3.14.6 |
+| Git for Windows | 無宣告 | 需要它內含的 Git Bash 來跑 `post-commit` hook | 2.55.0 |
+| Claude Code | 無宣告 | —— | 2.1.228 |
+
+下限不是我猜的，是這兩個套件自己宣告的值。**`install.ps1` 會實際比對版本**，不合就擋下來（見下節）。
 
 **Python 安裝注意**：裝在**使用者目錄**（預設的 `%LOCALAPPDATA%\Programs\Python\Python3xx`）比裝在 `C:\Program Files` 好，後者需要管理員權限才能 `pip install`。安裝時勾選「Add python.exe to PATH」。
 
@@ -64,6 +67,20 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1                # 機器�
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo <repo-root>   # 再做專案層級
 ```
 
+**它會先檢查前置需求，缺什麼就擋下來並給你安裝指令。** 五項工具逐一比對版本，狀態分成 `OK` / `TOO OLD` / `MISSING`；只要有一項不合，它**在安裝任何東西之前就停**（exit code 1），並印出每一項的 `winget install` 指令與官方下載連結。理由：半套設定好的機器比乾淨地停下來更難查。
+
+**它會問你要不要幫你裝**：偵測到缺少時顯示
+
+```
+   Install node, python, git now with winget? [y/N]
+```
+
+回答 `y` 就用 winget 裝，裝完**在同一個行程內重建 PATH 並重新檢查**，通過就繼續往下跑，不必重開終端機。按 Enter 或 `n` 就照原樣停下來（預設是 No，所以誤按 Enter 不會裝東西）。答了看不懂的字（例如 `yep`）它會再問一次，不會猜。
+
+想跳過詢問直接裝就加 `-InstallPrereqs`。**沒有任何情況會默默自動裝** —— 在別人的機器上不問就裝系統層級的 runtime 不是好行為，而且可能跟既有的 nvm／pyenv 或公司政策衝突。
+
+⚠️ **stdin 被重導向時（管線、CI、被其他工具啟動）它不會問**，直接當成 No 並印出安裝指令後退出。理由：問一個沒人能回答的問題會永遠卡住，「卡住」比「告訴你要裝什麼」糟糕得多。那種情境請用 `-InstallPrereqs`（把 `y` 用管線餵進去**沒有用**，這是刻意的）。
+
 腳本可重複執行，包含**自動改好 `settings.json`**（第 5 節那些環境變數與 SessionStart hook），所以沒有需要手動貼 JSON 的步驟。
 
 它動設定檔的方式是**保守的**：
@@ -75,11 +92,15 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo <repo-root>   # 再
 
 | 旗標 | 作用 |
 |---|---|
-| `-CheckOnly` | 只檢查環境版本，不安裝任何東西 |
+| `-CheckOnly` | 只檢查前置需求版本，不安裝任何東西 |
+| `-InstallPrereqs` | 缺少的前置需求用 winget 自動裝（預設不自動裝） |
+| `-SelfTest` | 跑腳本自己的版本解析與比較測試（10 項斷言），不碰系統 |
 | `-Repo <repo-root>` | 額外做該專案的步驟（post-commit hook、首次索引、向量、daemon） |
 | `-Pdg` | 首次索引時加 `--pdg`，`explain`（taint）與 `pdg_query` 需要它。會慢很多 |
 | `-PatchOnly` | 只補 `settings.json`，跳過所有安裝 |
 | `-NoSettingsPatch` | 不動設定檔，改成把 JSON 印出來讓你自己合併 |
+| `-NoAgentDoc` | 不要寫入專案的 `CLAUDE.md`（見第 6.4 節） |
+| `-AgentDocName AGENTS.md` | 改寫入 `AGENTS.md` 而非 `CLAUDE.md` |
 | `-SettingsPath <settings-path>` | 指定要改的設定檔（測試用） |
 
 ⚠️ **它會用 PowerShell 的 JSON 寫入器重排整個檔案的縮排。** 內容不變，但排版會變（Windows PowerShell 5.1 排出來的對齊格式比較醜；用 pwsh 7 跑是 2 空格）。如果你很在意手寫的排版，就用 `-NoSettingsPatch` 自己貼。
@@ -318,7 +339,33 @@ python -m code_review_graph daemon status
 
 ⚠️ **不要直接跑 `daemon start`。** 它會印「Forking is not supported on Windows — running in foreground」然後卡在前景，你的終端機一關它就死。要透過 `graph-refresh.ps1 -Detach`（內部用 `Start-Process -WindowStyle Hidden`）啟動，它才能跨 session 存活。重開機後會死，下一次 SessionStart 會自動復活。
 
-### 6.4 不用改 `.gitignore`
+### 6.4 告訴 AI 助手怎麼用這兩台（**別跳過**）
+
+裝好伺服器**不等於** AI 助手會正確使用它們。沒有明文規則，它會挑先看到的那台、把同一個問題問兩台燒雙倍 token、並且相信一份過期的索引給你錯答案。
+
+**`install.ps1 -Repo <repo-root>` 會自動寫進去**，不必手動貼：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -PatchOnly -Repo <repo-root>
+```
+
+它把規則包在自己的標記裡（`<!-- code-graph-servers:start -->` … `end`），所以：**重跑會就地更新**，不會累積第二份；**標記外的內容一個字都不動**（寫完會驗證，不通過就還原備份）；CLAUDE.md 不存在就幫你建。規則文字**只有一份來源** —— [`claude-md-snippet.md`](claude-md-snippet.md) 橫線以下的部分，改那裡再重跑即可。
+
+要寫進 `AGENTS.md` 而不是 `CLAUDE.md`：加 `-AgentDocName AGENTS.md`。完全不要它動：加 `-NoAgentDoc`。
+
+⚠️ **你的專案如果已經手寫過同樣的規則**，腳本不認得那份（沒有標記），會再加一份造成重複。這種情況請用 `-NoAgentDoc`，或先把手寫那份刪掉。
+
+想手動貼也可以，內容就是 [`claude-md-snippet.md`](claude-md-snippet.md) 橫線以下的部分。內容包含：
+
+- 按能力分工（哪台管找符號／哪台管 taint 與執行流程），並明寫**兩台都不是永遠的第一順位**。
+- 兩台的**新鮮度差異**：code-review-graph 每次呼叫重讀資料庫（當場生效）；GitNexus 把索引快取在伺服器啟動那一刻（要下一個工作階段）。
+- 四個會導致錯答案的前提：未 commit 的程式不在 GitNexus 圖譜裡、非程式碼檔只有 GitNexus 有、語意搜尋需要向量而 daemon 不補向量、`gitnexus analyze` 失敗也回傳 exit code 0。
+
+⚠️ **必須在 `<!-- gitnexus:start -->` … `<!-- gitnexus:end -->` 標記之外。** 那段是 `gitnexus setup` 產生的，下一次 `analyze` 會**整段覆蓋**，寫在裡面的東西會消失。腳本會**附加在該段之後**（實測驗證過位置），而且如果偵測到我們的標記已經被塞進 gitnexus 標記裡面，它會**拒絕寫入並要你先搬出來**，不會默默把規則寫進一個會被清掉的地方。
+
+那段還寫著「改任何符號前一律先跑 GitNexus `impact`」，跟本分工牴觸 —— snippet 裡已經明寫「那一句以本條為準」。
+
+### 6.5 不用改 `.gitignore`
 
 兩個工具都會在自己的資料夾裡放一個內容為 `*` 的 `.gitignore`，自我忽略。`git status` 看不到它們，**不要再手動加規則**。
 
@@ -413,6 +460,21 @@ python -m code_review_graph status --repo .    # 看 Last updated 那一行
 
 ---
 
+### 8.12 資料夾改名或搬移被拒（`being used by another process`）
+**監看 daemon 在 Windows 上持有目錄句柄。** 它用 watchdog 遞迴監看整個 repo，所以被監看樹裡的任何資料夾都不能改名或搬移，`Move-Item` 會回報「正由另一個處理程序使用」。
+
+先停、再搬、再啟動：
+
+```powershell
+python -m code_review_graph daemon stop
+Move-Item <舊路徑> <新路徑>
+powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\.claude\hooks\graph-refresh.ps1" -Which crg -Repo <repo-root> -Detach
+```
+
+同樣的原因也會擋掉 `git worktree remove`、刪除資料夾、以及部分 IDE 的重構搬檔操作。
+
+---
+
 ## 9. 移除
 
 ```powershell
@@ -433,4 +495,5 @@ python -m code_review_graph uninstall     # 移除它的資料、設定、hooks�
 | [`install.ps1`](install.ps1) | 一次做完機器層級 + 專案層級安裝，可重複執行 |
 | [`graph-refresh.ps1`](graph-refresh.ps1) | hook 用的更新腳本（主複本；安裝到 `~\.claude\hooks\`） |
 | [`post-commit`](post-commit) | git hook 主複本（安裝到 `<repo-root>\.git\hooks\`） |
+| [`claude-md-snippet.md`](claude-md-snippet.md) | 貼進你專案 `CLAUDE.md` 的分工規則（見第 6.4 節） |
 | `README.zh-TW.md` / [`README.en.md`](README.en.md) | 本文件 |

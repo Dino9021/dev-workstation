@@ -25,7 +25,7 @@ This document explains how to install and configure both code-graph MCP servers 
 
 ## 0. What each server owns
 
-**Neither server is always first choice.** Pick by the question, with no default preference. Copy this split into your own project's `CLAUDE.md` / `AGENTS.md` so your AI assistant follows it.
+**Neither server is always first choice.** Pick by the question, with no default preference. This split belongs in your project's `CLAUDE.md` / `AGENTS.md` so your AI assistant follows it — a paste-ready version is in [`claude-md-snippet.md`](claude-md-snippet.md) (see section 6.4).
 
 | | code-review-graph | GitNexus |
 |---|---|---|
@@ -42,12 +42,15 @@ Their databases are completely separate — no shared files, no lock contention 
 
 ## 1. Prerequisites
 
-| Requirement | Minimum | Version measured here |
-|---|---|---|
-| Node.js + npm | not declared; use LTS | node 24.18.0 / npm 12.0.1 |
-| Python | **3.10+** (declared by the package) | 3.14.6 |
-| Git for Windows | — | ships Git Bash, needed by the `post-commit` hook |
-| Claude Code | — | 2.1.228 |
+| Requirement | Minimum | Where the minimum comes from | Version measured here |
+|---|---|---|---|
+| Node.js | **22.0.0+** | gitnexus `package.json` → `engines.node: ">=22.0.0"` | 24.18.0 |
+| npm | ships with Node | — | 12.0.1 |
+| Python | **3.10+** | code-review-graph `Requires-Python: >=3.10` | 3.14.6 |
+| Git for Windows | none declared | needed for the Git Bash that runs the `post-commit` hook | 2.55.0 |
+| Claude Code | none declared | — | 2.1.228 |
+
+These minimums are what the packages themselves declare, not guesses. **`install.ps1` compares the actual versions** and blocks on a mismatch (see the next section).
 
 **Python install note**: install it **per-user** (the default `%LOCALAPPDATA%\Programs\Python\Python3xx`) rather than into `C:\Program Files`, which needs administrator rights for `pip install`. Tick "Add python.exe to PATH".
 
@@ -64,6 +67,20 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1                # machine-
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo <repo-root>   # per-repo steps
 ```
 
+**It checks the prerequisites first and blocks with install instructions if anything is missing.** All five tools are version-compared and reported as `OK` / `TOO OLD` / `MISSING`; a single failure **stops the run before anything is installed** (exit code 1) and prints the `winget install` command plus the official download URL for each. Reason: a half-configured machine is harder to diagnose than a clean stop.
+
+**It offers to install them for you.** When something is missing it asks:
+
+```
+   Install node, python, git now with winget? [y/N]
+```
+
+Answer `y` and it installs through winget, then **rebuilds PATH inside the same process and re-checks** — if everything passes it carries on, with no "re-open your terminal" round trip. Press Enter or `n` and it stops as before (the default is No, so a stray Enter installs nothing). An unrecognised answer such as `yep` is re-asked rather than guessed.
+
+Pass `-InstallPrereqs` to skip the question and install straight away. **Nothing is ever installed silently** — installing system-level runtimes on someone's machine without asking is not acceptable behaviour, and it can conflict with an existing nvm/pyenv setup or a corporate policy.
+
+⚠️ **When stdin is redirected (a pipe, CI, or a run launched by another tool) it does not ask** — it treats that as No, prints the install commands, and exits. A prompt nobody can answer would hang forever, and "it hung" is a far worse failure than "it told me what to install". Use `-InstallPrereqs` in those contexts; piping `y` into it deliberately does **not** work.
+
 The script is idempotent and it **does patch `settings.json` for you** (the environment variables and the SessionStart hook from section 5), so there is no JSON left to paste by hand.
 
 It edits that file conservatively:
@@ -75,11 +92,15 @@ It edits that file conservatively:
 
 | Flag | Effect |
 |---|---|
-| `-CheckOnly` | check tool versions only, install nothing |
+| `-CheckOnly` | check prerequisite versions only, install nothing |
+| `-InstallPrereqs` | install missing prerequisites through winget (never automatic) |
+| `-SelfTest` | run the script's own version-parsing/comparison tests (10 assertions), touching nothing |
 | `-Repo <repo-root>` | also run the per-repo steps (post-commit hook, first index, embeddings, daemon) |
 | `-Pdg` | add `--pdg` to the first index; required by `explain` (taint) and `pdg_query`. Much slower |
 | `-PatchOnly` | patch `settings.json` only, skip every install step |
 | `-NoSettingsPatch` | leave the settings file alone and print the JSON to merge yourself |
+| `-NoAgentDoc` | do not write the rule into the project's `CLAUDE.md` (section 6.4) |
+| `-AgentDocName AGENTS.md` | write into `AGENTS.md` instead of `CLAUDE.md` |
 | `-SettingsPath <settings-path>` | target a different settings file (used for testing) |
 
 ⚠️ **It reformats the whole file through PowerShell's JSON writer.** The content is preserved but the layout changes (Windows PowerShell 5.1 produces an aligned style; pwsh 7 produces 2-space indentation). Use `-NoSettingsPatch` if you care about your hand-written layout.
@@ -318,7 +339,33 @@ python -m code_review_graph daemon status
 
 ⚠️ **Do not run `daemon start` directly.** It prints "Forking is not supported on Windows — running in foreground" and blocks; closing the terminal kills it. Launch it through `graph-refresh.ps1 -Detach` (which uses `Start-Process -WindowStyle Hidden`) so it survives across sessions. It dies on reboot, and the next SessionStart revives it.
 
-### 6.4 No `.gitignore` edit needed
+### 6.4 Tell your AI agent how to use the two servers (**do not skip**)
+
+Installing the servers does **not** mean an agent uses them correctly. Without a written rule it picks whichever tool it saw first, asks both the same question at double the token cost, and trusts a stale index to give you a wrong answer.
+
+**`install.ps1 -Repo <repo-root>` writes it for you** — no pasting required:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -PatchOnly -Repo <repo-root>
+```
+
+It wraps the rule in its own markers (`<!-- code-graph-servers:start -->` … `end`), so a re-run **updates in place** instead of adding a second copy, **nothing outside those markers changes** (verified after the write; the backup is restored if it did), and a missing CLAUDE.md is created. The rule text has a **single source** — everything below the `---` in [`claude-md-snippet.md`](claude-md-snippet.md). Edit it there and re-run.
+
+Target `AGENTS.md` instead with `-AgentDocName AGENTS.md`. Skip this step entirely with `-NoAgentDoc`.
+
+⚠️ **If your project already carries the same rule written by hand**, the script cannot recognise it (no markers) and will add a second copy. Use `-NoAgentDoc`, or delete the hand-written one first.
+
+Pasting by hand also works — take everything below the `---` in the snippet. Either way it covers:
+
+- the split by capability (which server owns symbol lookup, which owns taint and execution flow), stating explicitly that **neither is always first choice**;
+- the **freshness difference**: code-review-graph re-reads the database per call (live), while GitNexus caches its index at server startup (next session only);
+- the four preconditions that otherwise produce wrong answers: uncommitted code is absent from the GitNexus graph, non-code files exist only in GitNexus, semantic search needs embeddings that the daemon never computes, and `gitnexus analyze` exits 0 even when it failed.
+
+⚠️ **It must live OUTSIDE the `<!-- gitnexus:start -->` … `<!-- gitnexus:end -->` markers.** That block comes from `gitnexus setup` and the next `analyze` **overwrites all of it**, so anything inside is lost. The script appends **after** that block (position verified by test), and if it finds our markers already sitting inside the gitnexus ones it **refuses to write and tells you to move them out** rather than quietly writing into a region that gets wiped.
+
+That block also says "always run GitNexus `impact` before editing a symbol", which contradicts this split — the snippet explicitly supersedes that line.
+
+### 6.5 No `.gitignore` edit needed
 
 Both tools drop a `.gitignore` containing `*` inside their own folder, so they ignore themselves. `git status` never shows them — **do not add rules by hand**.
 
@@ -413,6 +460,21 @@ So a GitNexus analyze that finishes after a commit is invisible to the current s
 
 ---
 
+### 8.12 Renaming or moving a folder fails with `being used by another process`
+**The watch daemon holds directory handles on Windows.** It watches the whole repo recursively through watchdog, so no folder inside the watched tree can be renamed or moved — `Move-Item` reports that another process is using it.
+
+Stop, move, restart:
+
+```powershell
+python -m code_review_graph daemon stop
+Move-Item <old-path> <new-path>
+powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\.claude\hooks\graph-refresh.ps1" -Which crg -Repo <repo-root> -Detach
+```
+
+The same cause blocks `git worktree remove`, folder deletion, and some IDE refactor-move operations.
+
+---
+
 ## 9. Uninstall
 
 ```powershell
@@ -433,4 +495,5 @@ Then remove by hand: `%USERPROFILE%\.claude\hooks\graph-refresh.ps1`, `<repo-roo
 | [`install.ps1`](install.ps1) | machine-wide + per-repo install in one go, idempotent |
 | [`graph-refresh.ps1`](graph-refresh.ps1) | the refresh script used by the hooks (master copy; installed to `~\.claude\hooks\`) |
 | [`post-commit`](post-commit) | git hook master copy (installed to `<repo-root>\.git\hooks\`) |
+| [`claude-md-snippet.md`](claude-md-snippet.md) | the usage rule to paste into your project's `CLAUDE.md` (section 6.4) |
 | [`README.zh-TW.md`](README.zh-TW.md) / `README.en.md` | this document |

@@ -21,8 +21,12 @@ param(
     [switch] $Pdg,
     [switch] $CheckOnly,
     [switch] $NoSettingsPatch,
+    [switch] $NoAgentDoc,
     [switch] $PatchOnly,
-    [string] $SettingsPath = (Join-Path $env:USERPROFILE '.claude\settings.json')
+    [switch] $InstallPrereqs,
+    [switch] $SelfTest,
+    [string] $SettingsPath = (Join-Path $env:USERPROFILE '.claude\settings.json'),
+    [string] $AgentDocName = 'CLAUDE.md'
 )
 
 $ErrorActionPreference = 'Continue'
@@ -168,6 +172,326 @@ function Merge-ClaudeSettings {
     return @{ Changed = $true; Notes = $notes; Backup = $backup }
 }
 
+function Get-ToolVersion {
+    <#
+      Pull the first dotted number out of a --version banner and keep at most three
+      components, because real banners are not clean semver:
+        node   -> "v24.18.0"
+        git    -> "git version 2.55.0.windows.2"   (4 parts + a word)
+        python -> "Python 3.14.6"
+        claude -> "2.1.228 (Claude Code)"
+      Returns $null when the tool is absent or printed nothing parseable.
+    #>
+    param([string] $Exe, [string[]] $VersionArgs = @('--version'))
+
+    if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return $null }
+    try { $raw = (& $Exe @VersionArgs 2>&1 | Out-String) } catch { return $null }
+    $m = [regex]::Match($raw, '\d+(\.\d+)*')
+    if (-not $m.Success) { return $null }
+    $parts = $m.Value.Split('.') | Select-Object -First 3
+    while ($parts.Count -lt 2) { $parts += '0' }
+    try { return [version] ($parts -join '.') } catch { return $null }
+}
+
+function Read-YesNo {
+    <#
+      Ask a yes/no question, defaulting to NO.
+
+      Returns $false immediately when stdin is redirected. A prompt nobody can answer
+      would hang a pipeline, a CI job, or a run launched by another tool forever, and
+      "it hung" is a much worse failure than "it told me what to install".
+    #>
+    param([string] $Question)
+
+    if ([Console]::IsInputRedirected) {
+        Write-Host "   (stdin is redirected - not asking, treating as No)" -ForegroundColor DarkGray
+        return $false
+    }
+    while ($true) {
+        $verdict = Get-YesNoVerdict (Read-Host "$Question [y/N]")
+        if ($verdict -eq 'Yes') { return $true }
+        if ($verdict -eq 'No') { return $false }
+        Write-Host "   Answer y or n." -ForegroundColor Yellow
+    }
+}
+
+function Get-YesNoVerdict {
+    # Split out from Read-YesNo so -SelfTest can exercise it without a console.
+    # Empty (just Enter) is No: the prompt shows [y/N], so the default must be No.
+    # Anything unrecognised is Unknown and gets re-asked rather than guessed.
+    param([string] $Answer)
+
+    switch (("$Answer").Trim().ToLowerInvariant()) {
+        { $_ -in @('y', 'yes') } { return 'Yes' }
+        { $_ -in @('', 'n', 'no') } { return 'No' }
+        default { return 'Unknown' }
+    }
+}
+
+function Get-PrereqRows {
+    # Minimums are what the packages declare, not guesses:
+    #   node   >= 22.0.0  (gitnexus package.json "engines")
+    #   python >= 3.10    (code-review-graph "Requires-Python")
+    # winget ids verified with `winget show --id <id> --exact`. Python 3.13 is the
+    # default for binary-wheel availability; 3.14 is also verified working here.
+    $prereqs = @(
+        @{ Name = 'node';   Exe = 'node';   Min = [version] '22.0.0'; Winget = 'OpenJS.NodeJS.LTS'; Url = 'https://nodejs.org/en/download' }
+        @{ Name = 'npm';    Exe = 'npm';    Min = $null;              Winget = $null;               Url = 'ships with Node.js' }
+        @{ Name = 'python'; Exe = 'python'; Min = [version] '3.10';   Winget = 'Python.Python.3.13'; Url = 'https://www.python.org/downloads/windows/' }
+        @{ Name = 'git';    Exe = 'git';    Min = $null;              Winget = 'Git.Git';           Url = 'https://git-scm.com/download/win' }
+        @{ Name = 'claude'; Exe = 'claude'; Min = $null;              Winget = $null;               Url = 'https://docs.claude.com/en/docs/claude-code' }
+    )
+
+    $rows = @()
+    foreach ($p in $prereqs) {
+        $v = Get-ToolVersion -Exe $p.Exe
+        $state = if (-not $v) { 'MISSING' }
+                 elseif ($p.Min -and $v -lt $p.Min) { 'TOO OLD' }
+                 else { 'OK' }
+        $rows += [pscustomobject] @{
+            Name = $p.Name; Found = $(if ($v) { $v.ToString() } else { '-' })
+            Min = $(if ($p.Min) { $p.Min.ToString() } else { 'any' })
+            State = $state; Winget = $p.Winget; Url = $p.Url
+        }
+    }
+    return $rows
+}
+
+function Show-PrereqRows {
+    param($Rows)
+    foreach ($r in $Rows) {
+        $colour = switch ($r.State) { 'OK' { 'Green' } 'TOO OLD' { 'Yellow' } default { 'Red' } }
+        Write-Host ("   {0,-8} {1,-10} min {2,-8} {3}" -f $r.Name, $r.Found, $r.Min, $r.State) -ForegroundColor $colour
+    }
+}
+
+function Test-Prerequisites {
+    <#
+      Reports every prerequisite as OK / TOO OLD / MISSING, and refuses to install
+      anything while a blocker remains - a half-configured machine is harder to
+      diagnose than a clean stop. Minimums are the ones the packages themselves
+      declare, not guesses:
+        node   >= 22.0.0  (gitnexus package.json "engines")
+        python >= 3.10    (code-review-graph "Requires-Python")
+      git / npm / claude have no declared minimum, so absence is the only failure.
+    #>
+    $rows = Get-PrereqRows
+    Show-PrereqRows $rows
+
+    # python is resolved separately: PATH may point at a different interpreter than
+    # the one that has the package (the classic cause of "-32000 Connection closed").
+    $script:python = Resolve-Python
+    if ($script:python) { Write-Host "   python path: $script:python" }
+
+    $blockers = @($rows | Where-Object { $_.State -ne 'OK' })
+    if (-not $blockers) { return 'all prerequisites satisfied' }
+
+    Write-Host ""
+    Write-Host "   Missing or too old:" -ForegroundColor Yellow
+    foreach ($b in $blockers) {
+        Write-Host ("     {0} ({1})" -f $b.Name, $b.State) -ForegroundColor Yellow
+        if ($b.Winget) { Write-Host ("       winget install --id {0} --accept-package-agreements --accept-source-agreements" -f $b.Winget) }
+        Write-Host ("       or: {0}" -f $b.Url)
+    }
+
+    $installable = @($blockers | Where-Object { $_.Winget })
+    $manualOnly = @($blockers | Where-Object { -not $_.Winget })
+
+    # -InstallPrereqs installs without asking; otherwise ASK, defaulting to No.
+    $doInstall = [bool] $InstallPrereqs
+    if (-not $doInstall -and $installable.Count -gt 0) {
+        Write-Host ""
+        $doInstall = Read-YesNo ("   Install " + (($installable | ForEach-Object { $_.Name }) -join ', ') + " now with winget?")
+    }
+
+    if (-not $doInstall) {
+        throw ("blocked by " + (($blockers | ForEach-Object { $_.Name }) -join ', ') +
+               ". Install them (commands above), or re-run with -InstallPrereqs.")
+    }
+
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw 'winget is not available on this host. Install the tools above by hand (URLs above).'
+    }
+
+    Write-Host ""
+    Write-Host "   Installing via winget..." -ForegroundColor Cyan
+    foreach ($b in $installable) {
+        Write-Host "     $($b.Name): winget install --id $($b.Winget)"
+        & winget install --id $b.Winget --exact --accept-package-agreements --accept-source-agreements 2>&1 |
+            Select-Object -Last 2 | ForEach-Object { Write-Host "       $_" }
+    }
+
+    # A winget install edits the machine/user PATH, but THIS process inherited the old
+    # one. Rebuild it in-process so the re-probe below can see the new tools instead of
+    # forcing a pointless "re-open your terminal" round trip.
+    $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
+                [Environment]::GetEnvironmentVariable('PATH', 'User')
+
+    Write-Host ""
+    Write-Host "   Re-checking after install:" -ForegroundColor Cyan
+    $rows = Get-PrereqRows
+    Show-PrereqRows $rows
+    $script:python = Resolve-Python
+    $stillBad = @($rows | Where-Object { $_.State -ne 'OK' })
+
+    if (-not $stillBad) { return 'installed via winget, all prerequisites satisfied' }
+
+    if ($manualOnly.Count -gt 0) {
+        Write-Host ("   These have no winget package and must be installed by hand: " +
+                    (($manualOnly | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
+    }
+    throw ("still blocked by " + (($stillBad | ForEach-Object { $_.Name }) -join ', ') +
+           ". If you just installed them, close this terminal and run the script again so PATH is rebuilt from scratch.")
+}
+
+function Invoke-SelfTest {
+    # One runnable check for the only non-obvious logic here: banner parsing and the
+    # minimum comparison. No framework, no fixtures.
+    $cases = @(
+        @{ In = 'v24.18.0';                      Want = '24.18.0' }
+        @{ In = 'git version 2.55.0.windows.2';  Want = '2.55.0' }
+        @{ In = 'Python 3.14.6';                 Want = '3.14.6' }
+        @{ In = '2.1.228 (Claude Code)';         Want = '2.1.228' }
+        @{ In = '12.0.1';                        Want = '12.0.1' }
+        @{ In = 'no numbers here';               Want = $null }
+    )
+    $fail = 0
+    foreach ($c in $cases) {
+        $m = [regex]::Match($c.In, '\d+(\.\d+)*')
+        $got = $null
+        if ($m.Success) {
+            $parts = $m.Value.Split('.') | Select-Object -First 3
+            while ($parts.Count -lt 2) { $parts += '0' }
+            $got = ([version] ($parts -join '.')).ToString()
+        }
+        $ok = ($got -eq $c.Want)
+        if (-not $ok) { $fail++ }
+        Write-Host ("   {0} parse {1,-32} -> {2}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $c.In, $got)
+    }
+    foreach ($c in @(
+        @{ V = '20.19.0'; Min = '22.0.0'; Want = $true }
+        @{ V = '24.18.0'; Min = '22.0.0'; Want = $false }
+        @{ V = '3.9.13';  Min = '3.10';   Want = $true }
+        @{ V = '3.14.6';  Min = '3.10';   Want = $false }
+    )) {
+        $tooOld = ([version] $c.V) -lt ([version] $c.Min)
+        $ok = ($tooOld -eq $c.Want)
+        if (-not $ok) { $fail++ }
+        Write-Host ("   {0} {1} < {2} = {3}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $c.V, $c.Min, $tooOld)
+    }
+    foreach ($c in @(
+        @{ In = 'y';    Want = 'Yes' }
+        @{ In = 'Y';    Want = 'Yes' }
+        @{ In = ' yes'; Want = 'Yes' }
+        @{ In = '';     Want = 'No' }      # bare Enter must not install anything
+        @{ In = 'n';    Want = 'No' }
+        @{ In = 'NO';   Want = 'No' }
+        @{ In = 'yep';  Want = 'Unknown' } # re-asked, never guessed as Yes
+        @{ In = 'sure'; Want = 'Unknown' }
+    )) {
+        $got = Get-YesNoVerdict $c.In
+        $ok = ($got -eq $c.Want)
+        if (-not $ok) { $fail++ }
+        Write-Host ("   {0} answer {1,-8} -> {2}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), "'$($c.In)'", $got)
+    }
+
+    Write-Host ""
+    if ($fail) { Write-Host "SELFTEST FAILED ($fail)" -ForegroundColor Red; exit 1 }
+    Write-Host "SELFTEST OK" -ForegroundColor Green
+    exit 0
+}
+
+function Merge-AgentDoc {
+    <#
+      Writes the code-graph usage rule into a project's CLAUDE.md (or AGENTS.md)
+      between our OWN markers, so a re-run updates in place instead of appending
+      a second copy.
+
+      The rule text has a single source: claude-md-snippet.md in this folder,
+      everything after its first `---` line. Edit that file, re-run, done - the
+      wording is never duplicated inside this script.
+
+      Two guards that matter:
+        - Our block must never land between <!-- gitnexus:start --> and
+          <!-- gitnexus:end -->. That block is regenerated by `gitnexus analyze`,
+          which would silently delete anything we put inside it.
+        - Everything outside our markers must survive byte-for-byte. Verified
+          after the write; the backup is restored if it did not.
+    #>
+    param([string] $RepoRoot, [string] $DocName, [string] $SnippetPath)
+
+    $START = '<!-- code-graph-servers:start -->'
+    $END = '<!-- code-graph-servers:end -->'
+    $GN_START = '<!-- gitnexus:start -->'
+    $GN_END = '<!-- gitnexus:end -->'
+
+    if (-not (Test-Path $SnippetPath)) { throw "snippet not found: $SnippetPath" }
+    $snippet = Get-Content $SnippetPath -Raw
+    $cut = [regex]::Match($snippet, '(?m)^---\s*$')
+    if (-not $cut.Success) { throw "snippet has no '---' separator, cannot tell header from body" }
+    $body = $snippet.Substring($cut.Index + $cut.Length).Trim()
+
+    $block = $START + "`n" +
+             "<!-- Generated by graph-servers/install.ps1 from claude-md-snippet.md." + "`n" +
+             "     Edit the snippet in the dev-workstation repo, then re-run the installer. -->" + "`n" +
+             $body + "`n" + $END
+
+    $doc = Join-Path $RepoRoot $DocName
+    $existed = Test-Path $doc
+    $original = if ($existed) { Get-Content $doc -Raw } else { '' }
+
+    $iStart = $original.IndexOf($START)
+    $iEnd = $original.IndexOf($END)
+
+    if ($iStart -ge 0 -and $iEnd -lt 0) { throw "$DocName has our start marker but no end marker - fix it by hand" }
+
+    if ($iStart -ge 0) {
+        # A gitnexus regeneration could have swallowed our block: refuse rather than
+        # write into a region that gets overwritten.
+        $gs = $original.IndexOf($GN_START); $ge = $original.IndexOf($GN_END)
+        if ($gs -ge 0 -and $ge -gt $gs -and $iStart -gt $gs -and $iStart -lt $ge) {
+            throw "our block sits INSIDE the gitnexus markers in $DocName - move it outside first, or the next 'gitnexus analyze' deletes it"
+        }
+        $prefix = $original.Substring(0, $iStart)
+        $suffix = $original.Substring($iEnd + $END.Length)
+        $updated = $prefix + $block + $suffix
+        $action = 'updated in place'
+    }
+    else {
+        $sep = if ($original.Trim().Length -gt 0) { "`n`n" } else { '' }
+        $updated = $original.TrimEnd() + $sep + $block + "`n"
+        $action = if ($existed) { 'appended' } else { "created $DocName" }
+    }
+
+    if ($existed -and $updated -eq $original) { return @{ Changed = $false; Action = 'already current'; Backup = $null } }
+
+    $backup = $null
+    if ($existed) {
+        $backup = "$doc.bak-$(Get-Date -Format yyyyMMddHHmmss)"
+        Copy-Item $doc $backup -Force
+    }
+    Set-Content $doc $updated -Encoding utf8
+
+    $after = Get-Content $doc -Raw
+    $problems = @()
+    if (([regex]::Matches($after, [regex]::Escape($START))).Count -ne 1) { $problems += 'start marker not present exactly once' }
+    if (([regex]::Matches($after, [regex]::Escape($END))).Count -ne 1) { $problems += 'end marker not present exactly once' }
+    if ($after -notmatch [regex]::Escape('Two code-graph servers')) { $problems += 'rule body missing after write' }
+    if ($existed) {
+        # everything outside our markers must be unchanged
+        $a = $after.IndexOf($START); $b = $after.IndexOf($END)
+        $outsideAfter = $after.Substring(0, $a) + $after.Substring($b + $END.Length)
+        $outsideBefore = if ($iStart -ge 0) { $original.Substring(0, $iStart) + $original.Substring($iEnd + $END.Length) } else { $original.TrimEnd() }
+        if ($outsideAfter.Trim() -ne $outsideBefore.Trim()) { $problems += 'content outside our markers changed' }
+    }
+    if ($problems) {
+        if ($backup) { Copy-Item $backup $doc -Force }
+        throw ("$DocName patch failed" + $(if ($backup) { ', restored from backup' }) + ". Problems: " + ($problems -join '; '))
+    }
+
+    return @{ Changed = $true; Action = $action; Backup = $backup }
+}
+
 function Invoke-SettingsPatch {
     $hookPath = (Join-Path $env:USERPROFILE '.claude\hooks\graph-refresh.ps1')
     $hookCommand = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$hookPath`" -Which both -Detach"
@@ -226,23 +550,41 @@ function Invoke-SettingsPatch {
     }
 }
 
-if ($PatchOnly) { Invoke-SettingsPatch; exit 0 }
+function Invoke-AgentDocPatch {
+    if ($NoAgentDoc) { return }
+    if (-not $Repo) {
+        Write-Host ""
+        Write-Host "== $AgentDocName" -ForegroundColor Cyan
+        Write-Host "   skipped: pass -Repo <repo-root> to write the rule into a project's $AgentDocName"
+        return
+    }
+    Write-Host ""
+    Write-Host "== Write the usage rule into $Repo\$AgentDocName" -ForegroundColor Cyan
+    try {
+        $r = Merge-AgentDoc -RepoRoot $Repo -DocName $AgentDocName `
+                            -SnippetPath (Join-Path $here 'claude-md-snippet.md')
+        Write-Host "   $($r.Action)" -ForegroundColor Green
+        if ($r.Backup) { Write-Host "   backup:  $($r.Backup)" }
+        if ($r.Changed) { Write-Host "   verified: markers unique, rule present, content outside them unchanged" -ForegroundColor Green }
+    }
+    catch {
+        Write-Host "   $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "   Paste claude-md-snippet.md by hand instead (everything below its '---')." -ForegroundColor Yellow
+    }
+}
+
+if ($SelfTest) { Invoke-SelfTest }
+if ($PatchOnly) { Invoke-SettingsPatch; Invoke-AgentDocPatch; exit 0 }
 
 # ---------------------------------------------------------------- preflight
 $python = $null
-Step 'Toolchain check' {
-    $script:python = Resolve-Python
-    $rows = @(
-        @{ Name = 'node';   Value = (& node --version 2>&1) }
-        @{ Name = 'npm';    Value = (& npm --version 2>&1) }
-        @{ Name = 'git';    Value = ((& git --version 2>&1) -replace 'git version ', '') }
-        @{ Name = 'claude'; Value = (& claude --version 2>&1) }
-        @{ Name = 'python'; Value = if ($script:python) { (& $script:python --version 2>&1) } else { 'MISSING' } }
-    )
-    foreach ($r in $rows) { Write-Host ("   {0,-8} {1}" -f $r.Name, $r.Value) }
-    if (-not $script:python) { throw 'python not found. Install Python 3.10+ or set CRG_PYTHON.' }
-    Write-Host "   python path: $script:python"
-    'ok'
+Step 'Prerequisites' { Test-Prerequisites }
+
+if ($results['Prerequisites'] -like 'FAILED*') {
+    Write-Host ""
+    Write-Host "Stopped before installing anything - a half-configured machine is harder" -ForegroundColor Yellow
+    Write-Host "to diagnose than a clean stop. Fix the items above and run this again." -ForegroundColor Yellow
+    exit 1
 }
 
 if ($CheckOnly) {
@@ -379,3 +721,4 @@ Write-Host "===== summary =====" -ForegroundColor Cyan
 $results.GetEnumerator() | ForEach-Object { Write-Host ("{0,-52} {1}" -f $_.Key, $_.Value) }
 
 Invoke-SettingsPatch
+Invoke-AgentDocPatch
