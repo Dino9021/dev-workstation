@@ -87,14 +87,14 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo <repo-root>   # 再
 
 1. 先備份成 `settings.json.bak-<時間戳>`。
 2. 用 `ConvertTo-Json -Depth 100` 寫回。**深度一定要指定** —— 預設只有 2，會把巢狀的 hooks 結構寫成字面的 `System.Object[]`，整個檔案就毀了。
-3. **寫完自我驗證**：能不能解析、`SessionStart` 還是不是 JSON 陣列、有沒有出現 `System.Object[]`、有沒有掉掉任何原本的頂層鍵。任何一項不過就**自動還原備份並回報失敗**。
+3. **寫完自我驗證**：能不能解析、`SessionStart` 還是不是 JSON 陣列、有沒有出現 `System.Object[]`、有沒有掉掉任何原本的頂層鍵。任何一項不過就**自動回滾並回報失敗**:原本就有的檔案還原備份;原本不存在、由它新建的檔案則直接刪掉(刪掉才是新建檔案的正確回滾)。
 4. **已存在的值一律保留不覆蓋**，只補缺的。所以你刻意設過的值不會被它改掉，重跑也不會有第二份備份。
 
 | 旗標 | 作用 |
 |---|---|
 | `-CheckOnly` | 只檢查前置需求版本，不安裝任何東西 |
 | `-InstallPrereqs` | 缺少的前置需求用 winget 自動裝（預設不自動裝） |
-| `-SelfTest` | 跑腳本自己的版本解析與比較測試（10 項斷言），不碰系統 |
+| `-SelfTest` | 跑腳本自己的版本解析與比較測試（18 項斷言），不碰系統 |
 | `-Repo <repo-root>` | 額外做該專案的步驟（post-commit hook、首次索引、向量、daemon） |
 | `-Pdg` | 首次索引時加 `--pdg`，`explain`（taint）與 `pdg_query` 需要它。會慢很多 |
 | `-PatchOnly` | 只補 `settings.json`，跳過所有安裝 |
@@ -102,6 +102,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo <repo-root>   # 再
 | `-NoAgentDoc` | 不要寫入專案的 `CLAUDE.md`（見第 6.4 節） |
 | `-AgentDocName AGENTS.md` | 改寫入 `AGENTS.md` 而非 `CLAUDE.md` |
 | `-SettingsPath <settings-path>` | 指定要改的設定檔（測試用） |
+| `-SnippetPath <path>` | 改用自訂的規則檔取代 `claude-md-snippet.md` |
 
 ⚠️ **它會用 PowerShell 的 JSON 寫入器重排整個檔案的縮排。** 內容不變，但排版會變（Windows PowerShell 5.1 排出來的對齊格式比較醜；用 pwsh 7 跑是 2 空格）。如果你很在意手寫的排版，就用 `-NoSettingsPatch` 自己貼。
 
@@ -349,7 +350,7 @@ python -m code_review_graph daemon status
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -PatchOnly -Repo <repo-root>
 ```
 
-它把規則包在自己的標記裡（`<!-- code-graph-servers:start -->` … `end`），所以：**重跑會就地更新**，不會累積第二份；**標記外的內容一個字都不動**（寫完會驗證，不通過就還原備份）；CLAUDE.md 不存在就幫你建。規則文字**只有一份來源** —— [`claude-md-snippet.md`](claude-md-snippet.md) 橫線以下的部分，改那裡再重跑即可。
+它把規則包在自己的標記裡（`<!-- code-graph-servers:start -->` … `end`），所以：**重跑會就地更新**，不會累積第二份；**標記外的內容一個字都不動**(寫完會驗證,不通過就回滾——有備份就還原,是新建的就刪掉)；CLAUDE.md 不存在就幫你建。規則文字**只有一份來源** —— [`claude-md-snippet.md`](claude-md-snippet.md) 橫線以下的部分，改那裡再重跑即可。
 
 要寫進 `AGENTS.md` 而不是 `CLAUDE.md`：加 `-AgentDocName AGENTS.md`。完全不要它動：加 `-NoAgentDoc`。
 

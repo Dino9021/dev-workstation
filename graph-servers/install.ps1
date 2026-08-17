@@ -6,15 +6,24 @@
   Per-repo steps (-Repo <repo-root>): post-commit hook -> first index of both graphs
                                  -> embeddings -> watch daemon
 
-  Idempotent: re-running it is safe. Nothing here edits settings.json - the exact
-  JSON to merge is PRINTED at the end, because a bad automated merge of a live
-  settings file costs more than a copy-paste.
+  Idempotent: re-running it is safe. It DOES edit settings.json and a project's
+  CLAUDE.md, always behind a backup, a post-write verification, and a rollback.
+  (An earlier version of this header claimed it edited nothing and only printed the
+  JSON - that is no longer true. -NoSettingsPatch / -NoAgentDoc restore that behaviour.)
+
+  Conventions, so the error handling is not a guessing game:
+    Get-* / ConvertTo-*     probes and pure helpers: return $null when absent
+    Invoke-*Gate / Merge-*  actions: THROW on a blocker, so Step records the failure
+    Read-*                  questions: return a bool, never throw, default to No
 
   Usage:
       powershell -ExecutionPolicy Bypass -File .\install.ps1
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo <repo-root>
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo <repo-root> -Pdg
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckOnly
+      powershell -ExecutionPolicy Bypass -File .\install.ps1 -SelfTest
+      powershell -ExecutionPolicy Bypass -File .\install.ps1 -PatchOnly -Repo <repo-root>
+      powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallPrereqs
 #>
 param(
     [string] $Repo,
@@ -26,7 +35,10 @@ param(
     [switch] $InstallPrereqs,
     [switch] $SelfTest,
     [string] $SettingsPath = (Join-Path $env:USERPROFILE '.claude\settings.json'),
-    [string] $AgentDocName = 'CLAUDE.md'
+    [string] $AgentDocName = 'CLAUDE.md',
+    # Overridable so a test can feed a deliberately broken snippet and prove the
+    # rollback path, and so anyone can ship a customised rule file.
+    [string] $SnippetPath
 )
 
 $ErrorActionPreference = 'Continue'
@@ -81,7 +93,8 @@ function Merge-ClaudeSettings {
     $notes = @()
     $edits = 0
 
-    if (Test-Path $Path) {
+    $existedBefore = Test-Path $Path
+    if ($existedBefore) {
         try { $settings = (Get-Content $Path -Raw) | ConvertFrom-Json }
         catch { throw "settings.json is not valid JSON - refusing to touch it. Fix it first: $($_.Exception.Message)" }
     }
@@ -165,32 +178,50 @@ function Merge-ClaudeSettings {
         }
     }
     if ($problems) {
-        if ($backup) { Copy-Item $backup $Path -Force }
-        throw ("settings.json patch failed, restored from backup. Problems: " + ($problems -join '; '))
+        # "Restore" for a file we just created means DELETING it. Without this branch a
+        # corrupted brand-new settings.json was left in place while the message claimed
+        # a restore had happened.
+        if ($backup) { Copy-Item $backup $Path -Force; $undo = 'restored from backup' }
+        elseif (-not $existedBefore) { Remove-Item $Path -Force -ErrorAction SilentlyContinue; $undo = 'removed the file we had just created' }
+        else { $undo = 'NOT rolled back - no backup was taken' }
+        throw ("settings.json patch failed, $undo. Problems: " + ($problems -join '; '))
     }
 
     return @{ Changed = $true; Notes = $notes; Backup = $backup }
 }
 
-function Get-ToolVersion {
+function ConvertTo-ToolVersion {
     <#
-      Pull the first dotted number out of a --version banner and keep at most three
-      components, because real banners are not clean semver:
+      Pure: a --version banner string in, a [version] or $null out. Kept separate so
+      -SelfTest exercises THIS function - the one that ships - instead of a copy of
+      its body. Real banners are not clean semver:
         node   -> "v24.18.0"
-        git    -> "git version 2.55.0.windows.2"   (4 parts + a word)
+        git    -> "git version 2.55.0.windows.2"   (4 parts plus a word)
         python -> "Python 3.14.6"
         claude -> "2.1.228 (Claude Code)"
-      Returns $null when the tool is absent or printed nothing parseable.
+
+      ponytail: first dotted number wins, at most three components. That covers every
+      banner this script probes (all of them are -SelfTest cases). A tool that printed
+      a date or a build number BEFORE its version would fool it; the upgrade path is a
+      per-tool regex in the prereq table, not a cleverer generic pattern.
     #>
+    param([string] $Banner)
+
+    $m = [regex]::Match("$Banner", '\d+(\.\d+)*')
+    if (-not $m.Success) { return $null }
+    $parts = @($m.Value.Split('.') | Select-Object -First 3)
+    while ($parts.Count -lt 2) { $parts += '0' }
+    try { return [version] ($parts -join '.') } catch { return $null }
+}
+
+function Get-ToolVersion {
+    # Run <exe> --version and parse it. Returns $null when the tool is absent or
+    # printed nothing parseable.
     param([string] $Exe, [string[]] $VersionArgs = @('--version'))
 
     if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { return $null }
     try { $raw = (& $Exe @VersionArgs 2>&1 | Out-String) } catch { return $null }
-    $m = [regex]::Match($raw, '\d+(\.\d+)*')
-    if (-not $m.Success) { return $null }
-    $parts = $m.Value.Split('.') | Select-Object -First 3
-    while ($parts.Count -lt 2) { $parts += '0' }
-    try { return [version] ($parts -join '.') } catch { return $null }
+    return ConvertTo-ToolVersion $raw
 }
 
 function Read-YesNo {
@@ -265,7 +296,7 @@ function Show-PrereqRows {
     }
 }
 
-function Test-Prerequisites {
+function Invoke-PrerequisiteGate {
     <#
       Reports every prerequisite as OK / TOO OLD / MISSING, and refuses to install
       anything while a blocker remains - a half-configured machine is harder to
@@ -357,13 +388,11 @@ function Invoke-SelfTest {
     )
     $fail = 0
     foreach ($c in $cases) {
-        $m = [regex]::Match($c.In, '\d+(\.\d+)*')
-        $got = $null
-        if ($m.Success) {
-            $parts = $m.Value.Split('.') | Select-Object -First 3
-            while ($parts.Count -lt 2) { $parts += '0' }
-            $got = ([version] ($parts -join '.')).ToString()
-        }
+        # Calls the shipping parser. Earlier this re-implemented it, which meant a
+        # change to ConvertTo-ToolVersion could break parsing while the test stayed
+        # green - a test validating a stale copy of the logic.
+        $v = ConvertTo-ToolVersion $c.In
+        $got = if ($v) { $v.ToString() } else { $null }
         $ok = ($got -eq $c.Want)
         if (-not $ok) { $fail++ }
         Write-Host ("   {0} parse {1,-32} -> {2}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $c.In, $got)
@@ -448,9 +477,15 @@ function Merge-AgentDoc {
     if ($iStart -ge 0) {
         # A gitnexus regeneration could have swallowed our block: refuse rather than
         # write into a region that gets overwritten.
+        # Check BOTH ends: a block that starts outside the gitnexus region but ends
+        # inside it is just as doomed, and checking only the start missed that case.
         $gs = $original.IndexOf($GN_START); $ge = $original.IndexOf($GN_END)
-        if ($gs -ge 0 -and $ge -gt $gs -and $iStart -gt $gs -and $iStart -lt $ge) {
-            throw "our block sits INSIDE the gitnexus markers in $DocName - move it outside first, or the next 'gitnexus analyze' deletes it"
+        if ($gs -ge 0 -and $ge -gt $gs) {
+            $startInside = ($iStart -gt $gs -and $iStart -lt $ge)
+            $endInside = ($iEnd -gt $gs -and $iEnd -lt $ge)
+            if ($startInside -or $endInside) {
+                throw "our block overlaps the gitnexus markers in $DocName (start inside=$startInside, end inside=$endInside) - move it outside first, or the next 'gitnexus analyze' deletes it"
+            }
         }
         $prefix = $original.Substring(0, $iStart)
         $suffix = $original.Substring($iEnd + $END.Length)
@@ -485,8 +520,11 @@ function Merge-AgentDoc {
         if ($outsideAfter.Trim() -ne $outsideBefore.Trim()) { $problems += 'content outside our markers changed' }
     }
     if ($problems) {
-        if ($backup) { Copy-Item $backup $doc -Force }
-        throw ("$DocName patch failed" + $(if ($backup) { ', restored from backup' }) + ". Problems: " + ($problems -join '; '))
+        # Same rule as the settings patch: undoing the creation of a file is deleting it.
+        if ($backup) { Copy-Item $backup $doc -Force; $undo = 'restored from backup' }
+        elseif (-not $existed) { Remove-Item $doc -Force -ErrorAction SilentlyContinue; $undo = 'removed the file we had just created' }
+        else { $undo = 'NOT rolled back - no backup was taken' }
+        throw ("$DocName patch failed, $undo. Problems: " + ($problems -join '; '))
     }
 
     return @{ Changed = $true; Action = $action; Backup = $backup }
@@ -561,8 +599,8 @@ function Invoke-AgentDocPatch {
     Write-Host ""
     Write-Host "== Write the usage rule into $Repo\$AgentDocName" -ForegroundColor Cyan
     try {
-        $r = Merge-AgentDoc -RepoRoot $Repo -DocName $AgentDocName `
-                            -SnippetPath (Join-Path $here 'claude-md-snippet.md')
+        $snippet = if ($SnippetPath) { $SnippetPath } else { Join-Path $here 'claude-md-snippet.md' }
+        $r = Merge-AgentDoc -RepoRoot $Repo -DocName $AgentDocName -SnippetPath $snippet
         Write-Host "   $($r.Action)" -ForegroundColor Green
         if ($r.Backup) { Write-Host "   backup:  $($r.Backup)" }
         if ($r.Changed) { Write-Host "   verified: markers unique, rule present, content outside them unchanged" -ForegroundColor Green }
@@ -578,7 +616,7 @@ if ($PatchOnly) { Invoke-SettingsPatch; Invoke-AgentDocPatch; exit 0 }
 
 # ---------------------------------------------------------------- preflight
 $python = $null
-Step 'Prerequisites' { Test-Prerequisites }
+Step 'Prerequisites' { Invoke-PrerequisiteGate }
 
 if ($results['Prerequisites'] -like 'FAILED*') {
     Write-Host ""

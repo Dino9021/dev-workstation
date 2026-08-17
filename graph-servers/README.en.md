@@ -87,14 +87,14 @@ It edits that file conservatively:
 
 1. Backs it up to `settings.json.bak-<timestamp>` first.
 2. Writes with `ConvertTo-Json -Depth 100`. **The depth is mandatory** — the default of 2 serialises the nested hooks structures as the literal string `System.Object[]` and destroys the file.
-3. **Verifies its own output**: does it parse, is `SessionStart` still a JSON array, did `System.Object[]` appear, did any pre-existing top-level key disappear. Any failure **restores the backup and reports failure**.
+3. **Verifies its own output**: does it parse, is `SessionStart` still a JSON array, did `System.Object[]` appear, did any pre-existing top-level key disappear. Any failure **rolls back and reports it**: a pre-existing file is restored from its backup, and a file the script had just created is deleted - deleting it IS the correct rollback for a creation.
 4. **Never overwrites an existing value** — it only fills in what is missing. A value you set deliberately survives, and a re-run produces no second backup.
 
 | Flag | Effect |
 |---|---|
 | `-CheckOnly` | check prerequisite versions only, install nothing |
 | `-InstallPrereqs` | install missing prerequisites through winget (never automatic) |
-| `-SelfTest` | run the script's own version-parsing/comparison tests (10 assertions), touching nothing |
+| `-SelfTest` | run the script's own version-parsing/comparison tests (18 assertions), touching nothing |
 | `-Repo <repo-root>` | also run the per-repo steps (post-commit hook, first index, embeddings, daemon) |
 | `-Pdg` | add `--pdg` to the first index; required by `explain` (taint) and `pdg_query`. Much slower |
 | `-PatchOnly` | patch `settings.json` only, skip every install step |
@@ -102,6 +102,7 @@ It edits that file conservatively:
 | `-NoAgentDoc` | do not write the rule into the project's `CLAUDE.md` (section 6.4) |
 | `-AgentDocName AGENTS.md` | write into `AGENTS.md` instead of `CLAUDE.md` |
 | `-SettingsPath <settings-path>` | target a different settings file (used for testing) |
+| `-SnippetPath <path>` | use a custom rule file instead of `claude-md-snippet.md` |
 
 ⚠️ **It reformats the whole file through PowerShell's JSON writer.** The content is preserved but the layout changes (Windows PowerShell 5.1 produces an aligned style; pwsh 7 produces 2-space indentation). Use `-NoSettingsPatch` if you care about your hand-written layout.
 
