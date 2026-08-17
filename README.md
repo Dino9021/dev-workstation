@@ -11,6 +11,7 @@ Repeatable setup for a development machine: the install guides and scripts I re-
 | Folder | Sets up | 設定什麼 |
 |---|---|---|
 | [`graph-servers/`](graph-servers/) | Two code-graph MCP servers for Claude Code — **GitNexus** and **code-review-graph** — plus hooks that keep both indexes current | 兩台給 Claude Code 用的程式圖譜 MCP 伺服器，含自動更新索引的 hook |
+| [`parallel-agent-operations/`](parallel-agent-operations/) | A `CLAUDE.md` rule that stops an agent fanning out into dozens of subagents on its own — it cannot see the session budget it would burn | 一段 `CLAUDE.md` 規則，阻止 AI 助手自作主張派出幾十個子代理（它看不到自己會燒掉多少額度） |
 
 Each folder carries its own step-by-step guide in Traditional Chinese and English.
 
