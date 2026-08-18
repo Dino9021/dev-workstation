@@ -39,25 +39,30 @@ The rule is not politeness, it is **not letting a whole batch evaporate**. The p
 
 1. **Plan**: pick the agent count and the model per agent by difficulty — haiku for mechanical/simple subtasks, sonnet for typical ones, opus (or the main model) only where deep reasoning is genuinely needed. **A cheaper model does not just cost less; it makes the same allowance stretch across more agents.**
 2. **Create the progress-control file**: `.agent-tasks/<YYYYMMDD-HHMMSS-task-name>/progress.md` (use whatever convention your project already has). The folder timestamp **must include hours-minutes-seconds** beyond the date, e.g. `20260713-170532-task-name`, so two tasks on the same day never collide. List every subtask with its agent, model, prompt, status (`pending`/`running`/`done`/`failed`/`delegated`), and output file path.
-3. **Confirm before dispatch**: report the **agent count (state the ceiling, not "a few"), the model assignments, the estimated cost, and the subtask list**, and **dispatch only after approval** — every time, no exceptions.
-   **Approval means a message the owner actually sent after your report.** Your own earlier message proposing a plan is not consent; a background-task completion notification is not consent; approval for a previous batch does not carry over to this one.
-   **⛔ The last line of that report must ask this** — never omit it, never bury it mid-report:
-
-   > Shall I write every agent prompt into a single .md file first? You could run them on a different account's allowance, have the reports land in the same task folder, and I will read them back.
-
-   **Why ask**: the owner may hold more than one account allowance. Rather than burning this session's budget, the prompts can be handed over, executed by the owner on another account, and written back into the same folder for the supervisor to read. **The filesystem is the handoff** — which makes this entirely practical, but the owner never gets the option unless you offer it.
-
-4. **If the owner wants the prompt file**: write `.agent-tasks/<YYYYMMDD-HHMMSS-task-name>/prompts.md`, obeying all three rules below — otherwise the handed-over prompts run and the results never come back:
+3. **Write the prompt file — always, before you ask anything**: write every agent prompt into
+   `.agent-tasks/<YYYYMMDD-HHMMSS-task-name>/prompts.md`. **This is mandatory and unconditional.**
+   Do **not** ask whether the owner wants it, do not skip it because the batch is small, read-only,
+   or "obviously going to run here" — the file is written every time, before the confirmation in
+   step 4. Obey all three rules below, otherwise handed-over prompts run and the results never come back:
    - **Every prompt must stand completely alone.** The agent executing it has **none of this conversation's context** and may be a different account, a different model, even a different tool. No "as discussed above", no "continuing from the previous step": every file path, version, constraint, and acceptance criterion goes into the prompt body itself.
    - **Every prompt must end by specifying its output path** as an explicit instruction, e.g. "Write your full report to `.agent-tasks/<YYYYMMDD-HHMMSS-task-name>/agent-03-pipeline-audit.md`; do not only reply in the chat." **Without that line the owner's run lands somewhere you cannot read**, and the whole exercise is pointless.
    - **Numbering and names must match `progress.md`** (`agent-NN-<subtask>`) so the supervisor can tell item by item what came back and what did not.
 
-   **⛔ Stop the moment `prompts.md` is written and ask again — do not start dispatching.** Producing the prompt file is **not** dispatch approval; the usual reason an owner wants the prompts is precisely that they intend to run them elsewhere. Report the path and how many prompts it holds, then ask:
+   **Why unconditional**: the owner may hold more than one account allowance. Rather than burning
+   this session's budget, the prompts can be handed over, executed by the owner on another account,
+   and written back into the same folder for the supervisor to read. **The filesystem is the
+   handoff.** Writing the file costs almost nothing; not having it is what removes the owner's
+   choice, and asking first is how that choice quietly got skipped.
 
-   > Prompts written to `<path>`, N of them. Shall I dispatch now — all of them, only some, or are you running them yourself?
+4. **Confirm before dispatch**: report the **agent count (state the ceiling, not "a few"), the model assignments, the estimated cost, the subtask list, and the `prompts.md` path with how many prompts it holds**, and **dispatch only after approval** — every time, no exceptions.
+   **Approval means a message the owner actually sent after your report.** Your own earlier message proposing a plan is not consent; writing `prompts.md` is not consent; a background-task completion notification is not consent; approval for a previous batch does not carry over to this one.
+   **⛔ The last line of that report must ask this** — never omit it, never bury it mid-report:
 
-   Dispatch nothing until the owner **actually replies**. The approval in step 3 covered planning and writing the prompts; it does not cover starting work once they exist.
-   Mark whatever the owner takes over as `delegated` in `progress.md`, and do **not** also run your own copy of it.
+   > Prompts written to `<path>`, N of them. Two ways to run this: you take them to another account's allowance and let the reports land back in the same task folder for me to read, or you approve me dispatching them from here. Which?
+
+   Dispatch nothing until the owner **actually replies**. If the owner takes some or all of it
+   elsewhere, mark those items `delegated` in `progress.md` and do **not** also run your own copy
+   of them.
 
 5. **Execute**: for every agent you do dispatch, that agent writes its process and results to its own file in the folder (`agent-NN-<subtask>.md`). **Writing files is not tidiness, it is what survives an exhausted allowance.** The supervisor (the main conversation) consolidates and updates `progress.md` the moment an agent finishes or fails.
 
