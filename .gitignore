@@ -1,0 +1,9 @@
+
+Memory/
+.gitignore
+CLAUDE.local.md*
+__pycache__/
+*.pyc
+.vscode/tasks.json
+/.claude/*.log
+/.claude/*.json
