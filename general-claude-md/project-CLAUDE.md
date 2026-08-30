@@ -37,6 +37,26 @@ Incidents behind this project's rules go to <!-- FILL: rule-history path, e.g.
      migrations, docs). State whether components must build from a sparse clone of their
      own path. Name any DEAD directory names so stale references read as drift. -->
 
+## Key commands
+
+<!-- FILL: the commands a new session actually types — build, run, lint, the project's own
+     CLI. One line each: the command, then what it does. Name the directory each one must
+     run from when it is not the repository root. Do NOT list a command that is just the
+     language's default; list the ones this project got wrong the first time. -->
+
+## Test structure
+
+<!-- FILL: where the tests live, how to run the whole suite in one command, and how to run
+     ONE test. Say which tests need something the machine may not have (a database, a
+     device, a network) and how they behave when it is absent — or delete this section if
+     there are no tests. -->
+
+## CI pipeline
+
+<!-- FILL: what runs on a push, where it runs, and which failures block a merge. Name the
+     config file. State any check that runs ONLY in CI, because that is the one a local run
+     cannot warn you about — or delete this section if there is no CI. -->
+
 ## Schema maintenance
 
 <!-- FILL: the files that must be updated with every schema change so the database can be
