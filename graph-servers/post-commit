@@ -1,0 +1,38 @@
+#!/bin/sh
+# Refresh the GitNexus index after every commit.
+#
+# Master copy: graph-servers/post-commit in the dev-workstation repo
+# Installed to: <repo-root>/.git/hooks/post-commit  (see install.ps1 -Repo)
+#
+# WHY A GIT HOOK, not a Claude Code hook:
+#   - GitNexus staleness is measured in COMMITS (.gitnexus/meta.json lastCommit vs
+#     HEAD), so a commit is the exact trigger.
+#   - A git hook fires for commits made outside Claude Code too - your terminal,
+#     your IDE - which a PostToolUse hook on Bash would miss.
+#
+# The refresh detaches itself (graph-refresh.ps1 -Detach re-launches hidden via
+# Start-Process), so `git commit` returns at once while the ~142s analyze runs in
+# the background. Measured 2026-08-17: analyze 142s, this hook returns in ~1.2s
+# (PowerShell startup).
+#
+# code-review-graph is deliberately NOT refreshed here. Its watch daemon ignores
+# **/.git/** (DEFAULT_IGNORE_PATTERNS in incremental.py), so `git commit` does not
+# even wake it, and it already indexed these files ~2s after each save. There is
+# nothing to serialise against either: the two servers use separate databases
+# (.gitnexus/lbug vs .code-review-graph/graph.db).
+#
+# NOTE: .git/hooks/ is NOT version-controlled. A fresh clone will not have this
+# hook - re-install it there.
+repo="$(git rev-parse --show-toplevel)"
+hook_ps1="$USERPROFILE\\.claude\\hooks\\graph-refresh.ps1"
+
+if [ ! -f "$hook_ps1" ]; then
+  echo "post-commit: graph-refresh.ps1 not installed, skipping GitNexus refresh" >&2
+  exit 0
+fi
+
+powershell -NoProfile -ExecutionPolicy Bypass \
+  -File "$hook_ps1" \
+  -Which gitnexus -Repo "$repo" -Detach >/dev/null 2>&1
+
+exit 0
