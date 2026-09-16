@@ -32,6 +32,27 @@ justification; if two instructions conflict, resolve the conflict in the text.
 11. Question real contradictions.
 12. Otherwise execute directly.
 
+## Pending items — one file, every session
+
+`Memory/PENDING.md` is the ONE place a deferred item lives. Never leave a deferred item in
+a task folder, a note, or a chat message: a later session does not know where to look, and
+the item is lost rather than postponed.
+
+**Write to it whenever the owner defers something** — "put this on the todo list", "leave
+it for later", "pend this one", "let me think about it", or any equivalent phrasing in ANY
+language, including Traditional Chinese. Append one line: the date, the item, and what the
+decision hinges on. Do not ask where it goes, and do not wait to be told the file name.
+
+**Read it whenever the owner asks what is still open** — "what is left", "what did we not
+finish", or any equivalent. The file is the answer. If it does not exist, say "nothing
+pending"; do not create it empty.
+
+A pending raised by `unattended-work` §7 keeps its debate write-up in the task folder,
+where the evidence belongs, and gets ONE line here that points at that file.
+
+`Memory/` is the default memory root; a project that uses another root records that
+exception in its own `CLAUDE.md`.
+
 ## Git — absolute
 
 Commands below name the trunk `main` and the remote `origin`; substitute a project's own

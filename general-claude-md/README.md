@@ -10,7 +10,7 @@ scope, on-demand depth in a referenced doc.** Doc facts verified against
 
 | file here | copy to | loads | lines |
 |---|---|---|---|
-| `user-CLAUDE.md` | `~/.claude/CLAUDE.md` | every session, every project on the machine | 208 |
+| `user-CLAUDE.md` | `~/.claude/CLAUDE.md` | every session, every project on the machine | 229 |
 | `project-CLAUDE.md` | `<repo>/CLAUDE.md`, slots filled | every session in that project | 202 before filling |
 | `pwsh-version-guard.ps1` | paste into any PowerShell script you write, after its `param()` | — the user file's quoting rule points here | 98 |
 | `VERIFICATION-LESSONS.md` | `~/.claude/docs/VERIFICATION-LESSONS.md` | **on demand** — the user file mandates reading it before verification-type work | — |
