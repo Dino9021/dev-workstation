@@ -40,7 +40,7 @@ Each folder carries its own step-by-step guide in Traditional Chinese and Englis
 ## Getting started | 開始使用
 
 ```powershell
-git clone https://github.com/<your-github-username>/dev-workstation.git
+git clone https://github.com/Dino9021/dev-workstation.git
 cd dev-workstation\graph-servers
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckOnly
 ```
