@@ -243,3 +243,11 @@ has no chance of being complete while the person running it feels thorough.
    and a human acts on them differently. Say which, every row.
 4. State the instrument per row, or the table cannot be audited.
 5. Name what you did NOT sweep, so its silence does not read as "nothing there".
+
+## 9. Where the rest lives
+
+The controls beyond the positive one — the **pattern** probe that must fire, the **lookalike**
+that must not, the fresh **negative** sentinel, the partition control, the calibrated threshold
+and the wrapped-line false zero — are kept in ONE place, the `dispatch-guard` plugin:
+`skills/cowork/reference/verification.md` Part 3, with `unattended-work` §11 as its short form.
+This file points there and does not restate them; the plugin is the live copy.

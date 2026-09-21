@@ -38,35 +38,33 @@ The rule is not politeness, it is **not letting a whole batch evaporate**. The p
 ### The flow — no skipping steps
 
 1. **Plan**: pick the agent count and the model per agent by difficulty — haiku for mechanical/simple subtasks, sonnet for typical ones, opus (or the main model) only where deep reasoning is genuinely needed. **A cheaper model does not just cost less; it makes the same allowance stretch across more agents.**
-2. **Create the progress-control file**: `Memory/tasks/<YYYYMMDD-HHMMSS-task-name>/progress.md` (use whatever convention your project already has). The folder timestamp **must include hours-minutes-seconds** beyond the date, e.g. `20260713-170532-task-name`, so two tasks on the same day never collide. List every subtask with its agent, model, prompt, status (`pending`/`running`/`done`/`failed`/`delegated`), and output file path.
+2. **Create the progress-control file**: `Memory/tasks/<YYYYMMDD-HHMMSS-task-name>/progress.md` (use whatever convention your project already has). The folder timestamp **must include hours-minutes-seconds** beyond the date, e.g. `20260713-170532-task-name`, so two tasks on the same day never collide. List every subtask with its agent, model, prompt, status (`pending`/`running`/`done`/`failed`), and output file path.
 3. **Write the prompt file — always, before you ask anything**: write every agent prompt into
    `Memory/tasks/<YYYYMMDD-HHMMSS-task-name>/prompts.md`. **This is mandatory and unconditional.**
    Do **not** ask whether the owner wants it, do not skip it because the batch is small, read-only,
    or "obviously going to run here" — the file is written every time, before the confirmation in
-   step 4. Obey all three rules below, otherwise handed-over prompts run and the results never come back:
-   - **Every prompt must stand completely alone.** The agent executing it has **none of this conversation's context** and may be a different account, a different model, even a different tool. No "as discussed above", no "continuing from the previous step": every file path, version, constraint, and acceptance criterion goes into the prompt body itself.
-   - **Every prompt must end by specifying its output path** as an explicit instruction, e.g. "Write your full report to `Memory/tasks/<YYYYMMDD-HHMMSS-task-name>/agent-03-pipeline-audit.md`; do not only reply in the chat." **Without that line the owner's run lands somewhere you cannot read**, and the whole exercise is pointless.
+   step 4. This holds for ONE agent as much as for a batch. Obey all three rules below:
+   - **Every prompt must stand completely alone.** The agent executing it has **none of this conversation's context**. No "as discussed above", no "continuing from the previous step": every file path, version, constraint, and acceptance criterion goes into the prompt body itself.
+   - **Every prompt must end by specifying its output path** as an explicit instruction, e.g. "Write your full report to `Memory/tasks/<YYYYMMDD-HHMMSS-task-name>/agent-03-pipeline-audit.md`; do not only reply in the chat." **Without that line the result lands somewhere nobody can read back**, and the whole exercise is pointless.
    - **Numbering and names must match `progress.md`** (`agent-NN-<subtask>`) so the supervisor can tell item by item what came back and what did not.
 
-   **Why unconditional**: the owner may hold more than one account allowance. Rather than burning
-   this session's budget, the prompts can be handed over, executed by the owner on another account,
-   and written back into the same folder for the supervisor to read. **The filesystem is the
-   handoff.** Writing the file costs almost nothing; not having it is what removes the owner's
-   choice, and asking first is how that choice quietly got skipped.
+   **Why unconditional**: the file is what survives. An allowance that runs out mid-batch kills
+   every in-flight agent; a session that dies loses the plan it never wrote down; a reviewer can
+   only judge a prompt it can read. **The filesystem is the handoff.** Writing the file costs
+   almost nothing, and "shall I write the prompts first?" is exactly how it quietly got skipped.
 
-4. **Confirm before dispatch**: report the **agent count (state the ceiling, not "a few"), the model assignments, the estimated cost, the subtask list, and the `prompts.md` path with how many prompts it holds**, and **dispatch only after approval** — every time, no exceptions.
+4. **Confirm before dispatch** — for 2 or more agents: report the **agent count (state the ceiling, not "a few"), the model assignments, the estimated cost, the subtask list, and the `prompts.md` path with how many prompts it holds**, and **dispatch only after approval** — every time, no exceptions.
    **Approval means a message the owner actually sent after your report.** Your own earlier message proposing a plan is not consent; writing `prompts.md` is not consent; a background-task completion notification is not consent; approval for a previous batch does not carry over to this one.
-   **⛔ The last line of that report must ask this** — never omit it, never bury it mid-report:
+   **⛔ The last line of that report names the file and asks** — never omit it, never bury it mid-report:
 
-   > Prompts written to `<path>`, N of them. Two ways to run this: you take them to another account's allowance and let the reports land back in the same task folder for me to read, or you approve me dispatching them from here. Which?
+   > Prompts written to `<path>`, N of them. May I dispatch them?
 
-   Dispatch nothing until the owner **actually replies**. If the owner takes some or all of it
-   elsewhere, mark those items `delegated` in `progress.md` and do **not** also run your own copy
-   of them.
+   Dispatch nothing until the owner **actually replies**. A single agent needs no such report,
+   but its prompt is still written to the file and the path is still stated before the call.
 
 5. **Execute**: for every agent you do dispatch, that agent writes its process and results to its own file in the folder (`agent-NN-<subtask>.md`). **Writing files is not tidiness, it is what survives an exhausted allowance.** The supervisor (the main conversation) consolidates and updates `progress.md` the moment an agent finishes or fails.
 
-6. **Resume after interruption**: a new session reads `progress.md` first. `done` items are reused from their output files. For `delegated` items, check whether the corresponding file has appeared — treat it as `done` if it has, and ask the owner whether it is still coming if it has not. Only `failed` and unfinished (`pending`/`running`) items are re-dispatched, again with owner approval first.
+6. **Resume after interruption**: a new session reads `progress.md` first. `done` items are reused from their output files. Only `failed` and unfinished (`pending`/`running`) items are re-dispatched, again with owner approval first.
 
 ### This section exists because it was learned the hard way
 

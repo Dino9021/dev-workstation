@@ -37,28 +37,29 @@ Point 3 is the expensive one. A batch that dies at 80% completion does not deliv
 | **Report the ceiling, then wait for an actual reply** | The spending decision moves to the person who can see the balance |
 | **Model tiering** — haiku for mechanical subtasks | The same allowance stretches across more agents |
 | **A progress file + one output file per agent** | An interrupted batch resumes instead of restarting. This is what turns "budget gone, nothing to show" into "budget gone, keep what finished" |
-| **Write the prompts to a file every time, then ask which way to run it** | Lets the work run on a *different* account's allowance — see below |
+| **Write the prompts to a file every time, and state the path** | The plan survives the session, a reviewer can read it, and an interrupted batch resumes from it — see below |
 
-## Running the batch on another account | 用別的帳號額度來跑
+## Why the prompts always go to a file | 為什麼提示詞一律先寫成檔案
 
-The rule requires the supervisor to write every agent prompt into one `.md` file **before it asks anything**, and to **end** the pre-dispatch report by asking which way the batch runs. That unlocks a way out of the budget problem entirely:
+The rule requires the supervisor to write every agent prompt into one `.md` file **before it asks anything** — for one agent as much as for twenty — and to name that path in the pre-dispatch report:
 
 1. The supervisor writes `Memory/tasks/<YYYYMMDD-HHMMSS-task-name>/prompts.md`. **Always** — not on request, not only for big batches.
-2. **Then it reports and asks**: take the prompts to another account's allowance, or approve dispatch from here? Writing the prompts is not permission to dispatch.
-3. The owner runs whichever prompts they like under **another account, another model, or another tool entirely**.
-4. Each prompt already ends with an explicit instruction to write its report to `Memory/tasks/<same-folder>/agent-NN-<subtask>.md`.
-5. The supervisor reads those files back and consolidates. Items handed over are marked `delegated` in `progress.md`, so a later session can tell "waiting on the owner" apart from "failed".
+2. For **2 or more agents** it then reports the count, the models, the cost, the subtask list and the file path, and **waits for the owner's reply**. Writing the prompts is not permission to dispatch. A single agent needs no report, but its prompt is still on disk and its path still stated.
+3. Each prompt ends with an explicit instruction to write its report to `Memory/tasks/<same-folder>/agent-NN-<subtask>.md`.
+4. The supervisor reads those files back and consolidates, and a later session resumes from `progress.md` and the files instead of restarting.
 
-Why the file is unconditional: asking "shall I write the prompts first?" is exactly how the option quietly disappears — an agent that wants to dispatch will not ask. Writing the file costs almost nothing, and it is what makes the second option real.
+Why the file is unconditional: asking "shall I write the prompts first?" is exactly how it quietly disappears — an agent that wants to dispatch will not ask. Writing the file costs almost nothing.
 
-**The filesystem is the handoff.** Nothing has to be pasted back into the conversation, and the executing agent needs no access to it.
+**The filesystem is the handoff.** Nothing has to be pasted back into the conversation.
 
 Two details decide whether this works at all, and both are hard requirements in the snippet:
 
 - **Each prompt must stand completely alone.** The agent running it has none of the originating conversation — no "as discussed", no implicit paths. Everything it needs goes in the prompt body.
-- **Each prompt must name its output path.** Without that line the results land in some other chat window and the supervisor never sees them, which wastes the exercise entirely.
+- **Each prompt must name its output path.** Without that line the results land in a chat window and the supervisor never sees them, which wastes the exercise entirely.
 
-規則要求主控在問任何事之前，就先把所有提示詞寫成一個 md 檔（**一律要寫**，不是問過才寫），再由派遣前報告的**最後一句**問「這批要拿去別的帳號跑，還是同意我在這裡派工」。這就打開了繞過額度限制的路：主控寫出 `prompts.md` → 報告並詢問（寫完提示詞不等於可以開工）→ 擁有者拿去用別的帳號、別的模型甚至別的工具執行 → 每段提示詞結尾都已指定把報告寫進同一個任務資料夾 → 主控讀檔統整，交出去的項目在 `progress.md` 標成 `delegated`。**檔案系統就是交接點。** 兩個硬性要求決定這件事成不成立：每段提示詞必須能單獨成立（執行它的代理沒有原始對話），以及每段提示詞都必須指定輸出路徑（否則結果落在主控讀不到的地方）。
+⚠ Until 2026-09-21 this section described a second way to run the batch — the owner taking the prompts to another account's allowance — and the snippet made every pre-dispatch report end by asking which way. The owner withdrew that question: it was the *reason* the file is always written, and it had turned into a sentence printed at every dispatch. The file stays unconditional; the question is gone.
+
+規則要求主控在問任何事之前，就先把所有提示詞寫成一個 md 檔（**一律要寫**，派 1 個代理也要寫），再在派遣前的報告裡說出檔案路徑。派 **2 個以上**代理時要報告數量、模型、花費、子任務清單與路徑，**等擁有者回覆才派**；寫完提示詞不等於可以開工。只派 1 個不需要報告，但提示詞仍在檔案裡、路徑仍要說。每段提示詞結尾都指定把報告寫進同一個任務資料夾，主控讀檔統整，下一個 session 從 `progress.md` 與檔案續跑而不是重跑。**檔案系統就是交接點。** 兩個硬性要求：每段提示詞必須能單獨成立，以及每段都必須指定輸出路徑。⚠ 2026-09-21 之前這一節還寫了第二種跑法（擁有者拿去別的帳號額度跑），片段也要求每次報告的最後一句問「要哪一種」；擁有者已撤回那個問句 —— 它是「為什麼一律寫檔」的理由，卻變成每次派遣都印一遍的文字。檔案照寫，問句拿掉。
 
 ## Where it came from | 緣由
 
