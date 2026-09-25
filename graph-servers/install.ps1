@@ -119,6 +119,19 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
 $ErrorActionPreference = 'Continue'
 
+# PowerShell decodes a native command's stdout with [Console]::OutputEncoding, which
+# on a zh-TW host defaults to CP950 (Big5). npm, pip, gitnexus and the claude CLI all
+# emit UTF-8, so without this their output arrives mangled - and anything capturing
+# it (the root install.ps1's transcript, a redirect, a CI log) stores the mangled
+# text rather than causing it. Measured 2026-09-22: the six UTF-8 bytes of a
+# horizontal ellipsis plus a check mark contain the pair A6 E2, a valid Big5
+# character, and surfaced in a log as U+8272.
+#
+# Set here as well as in the root script because this file is independently
+# runnable. It is deliberately NOT restored: this script has no single exit funnel
+# to restore it from, and leaving a console in UTF-8 breaks nothing.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 # Belt and braces behind the gate above, and the reason the -SelfTest encoding case
 # still has something to assert. PowerShell 7 already reads UTF-8 by default, so this
 # changes nothing here; it keeps the behaviour right if these functions are ever
@@ -347,6 +360,78 @@ function Get-YesNoVerdict {
     }
 }
 
+# The packages whose install scripts GitNexus needs, exactly as npm's own warning
+# lists them (npm 11.19.0, read off this host 2026-09-22). npm blocks lifecycle
+# scripts by default, so without this the native dependencies - onnxruntime-node,
+# the tree-sitter grammars, protobufjs - never run their postinstall.
+#
+# A LITERAL LIST, not parsed out of npm's warning text: a parser over a warning
+# message breaks the day the wording changes. A new dependency simply re-prints the
+# warning, which costs nothing.
+#
+# ON AN OLDER npm THIS DEGRADES, IT DOES NOT BREAK, so there is no version probe
+# and no fallback. Measured on this host: npm answers an unknown flag with
+# "npm warn Unknown cli config" and exit 0. An npm that predates --allow-scripts
+# therefore installs exactly as it did before, warning included.
+$script:GitNexusAllowScripts = (@(
+    'gitnexus', '@ladybugdb/core', '@scarf/scarf', 'onnxruntime-node',
+    'tree-sitter', 'tree-sitter-c-sharp', 'tree-sitter-cpp', 'tree-sitter-go',
+    'tree-sitter-java', 'tree-sitter-javascript', 'tree-sitter-php',
+    'tree-sitter-python', 'tree-sitter-ruby', 'tree-sitter-rust',
+    'tree-sitter-typescript', 'protobufjs'
+) -join ',')
+
+function Test-GitNexusIndexCurrent {
+    <#
+      Should the first-index step be SKIPPED? Pure: it takes the two commit ids and
+      the flag and returns a decision, so the self-test can drive every branch
+      without an index on disk.
+
+      The condition is the one graph-refresh.ps1 already uses - meta.json's
+      lastCommit against HEAD - rather than a second, differently-worded idea of
+      "fresh".
+
+      ONE ASYMMETRY, AND IT IS DELIBERATE: -Pdg always re-indexes. meta.json records
+      NOTHING about pdg/taint/cfg (checked 2026-09-22: its keys are
+      analysisFeatures, capabilities, indexCoverage, stats and friends, none of
+      which mention them), so nothing on disk can prove an existing index carries
+      the PDG layers. Skipping on a matching commit would silently leave `explain`
+      and `pdg_query` with no data while reporting success. The reverse is safe: an
+      index BUILT with --pdg is a superset, so a later run without -Pdg may skip.
+    #>
+    param([string] $IndexedCommit, [string] $HeadCommit, [bool] $WantPdg)
+    if ($WantPdg) { return $false }
+    if (-not $IndexedCommit) { return $false }
+    if (-not $HeadCommit) { return $false }
+    return ($IndexedCommit -eq $HeadCommit)
+}
+
+function Test-CrgGraphBuilt {
+    <#
+      Should the code-review-graph build+embed step be SKIPPED? Pure, same reason.
+
+      THIS ASSERTS "WAS BUILT AND EMBEDDED ONCE", NOT "IS CURRENT". Keeping it
+      current is the watch daemon's job for the graph, and nothing's job for the
+      embeddings - CLAUDE.local.md is explicit that the daemon does NOT embed new
+      code. So the step's message says re-embed by hand after substantial changes
+      rather than implying freshness this cannot see.
+
+      Node and embedding counts come from the database itself. The graph.db FILE
+      TIMESTAMP is deliberately not used: SQLite can write inside existing pages,
+      so the mtime does not always move, which looks exactly like "it never ran".
+    #>
+    param([int] $NodeCount, [int] $EmbeddingCount)
+    return (($NodeCount -gt 0) -and ($EmbeddingCount -gt 0))
+}
+
+function Get-GitNexusInstallArgs {
+    # Separate from the Step so the self-test can assert on the assembled argument
+    # list without running an install. The comma list must contain NO space: a
+    # space would split it into a second argument and npm would read the remainder
+    # as a package name.
+    return , @('install', '-g', 'gitnexus', "--allow-scripts=$script:GitNexusAllowScripts")
+}
+
 function Get-PrereqRows {
     # Minimums are what the packages declare, not guesses:
     #   node   >= 22.0.0  (gitnexus package.json "engines")
@@ -510,6 +595,47 @@ function Invoke-SelfTest {
         $ok = ($got -eq $c.Want)
         if (-not $ok) { $fail++ }
         Write-Host ("   {0} answer {1,-8} -> {2}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), "'$($c.In)'", $got)
+    }
+
+    # The npm argument list, asserted without running an install. The no-space
+    # check is the one that matters: a space inside the comma list would split it
+    # into a second argument and npm would read the remainder as a package name.
+    $npmArgs = Get-GitNexusInstallArgs
+    $flag = @($npmArgs | Where-Object { $_ -like '--allow-scripts=*' })
+    $ok = ($npmArgs[0] -eq 'install') -and ($npmArgs -contains '-g') -and
+          ($npmArgs -contains 'gitnexus') -and ($flag.Count -eq 1) -and
+          ($flag[0] -like '*,onnxruntime-node,*') -and
+          ($flag[0] -like '*,tree-sitter-typescript,*') -and
+          ($flag[0] -notlike '* *')
+    if (-not $ok) { $fail++ }
+    Write-Host ("   {0} npm args carry --allow-scripts with the native deps, no spaces" -f $(if ($ok) { 'PASS' } else { 'FAIL' }))
+
+    # The two skip decisions, driven through every branch without an index on disk.
+    # These are what stop a re-run paying 142s for an index it already has - and,
+    # more importantly, what stop it SKIPPING one it does not have.
+    foreach ($c in @(
+        @{ Idx = 'abc123'; Head = 'abc123'; Pdg = $false; Want = $true;  Why = 'same commit, no -Pdg: skip' }
+        @{ Idx = 'abc123'; Head = 'def456'; Pdg = $false; Want = $false; Why = 'HEAD moved: re-index' }
+        @{ Idx = $null;    Head = 'abc123'; Pdg = $false; Want = $false; Why = 'no meta.json: re-index' }
+        @{ Idx = 'abc123'; Head = '';       Pdg = $false; Want = $false; Why = 'HEAD unknown: re-index' }
+        @{ Idx = 'abc123'; Head = 'abc123'; Pdg = $true;  Want = $false; Why = '-Pdg always re-indexes' }
+    )) {
+        $got = Test-GitNexusIndexCurrent -IndexedCommit $c.Idx -HeadCommit $c.Head -WantPdg $c.Pdg
+        $ok = ($got -eq $c.Want)
+        if (-not $ok) { $fail++ }
+        Write-Host ("   {0} gitnexus skip: {1}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $c.Why)
+    }
+
+    foreach ($c in @(
+        @{ N = 110; E = 48; Want = $true;  Why = 'built and embedded: skip' }
+        @{ N = 110; E = 0;  Want = $false; Why = 'nodes but NO embeddings: build' }
+        @{ N = 0;   E = 0;  Want = $false; Why = 'empty database: build' }
+        @{ N = 0;   E = 5;  Want = $false; Why = 'embeddings but no nodes: build' }
+    )) {
+        $got = Test-CrgGraphBuilt -NodeCount $c.N -EmbeddingCount $c.E
+        $ok = ($got -eq $c.Want)
+        if (-not $ok) { $fail++ }
+        Write-Host ("   {0} crg skip: {1}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $c.Why)
     }
 
     # --- which doc gets the rule, and is it personal? Both halves shipped wrong once.
@@ -951,9 +1077,34 @@ if ($CheckOnly) {
 Step 'GitNexus: npm global install' {
     # npm 11.x can crash inside `npx` ("node.target is null", GitNexus #1939),
     # so install globally instead of relying on npx.
-    & npm install -g gitnexus 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "   $_" }
+    #
+    # --allow-scripts: npm blocks lifecycle scripts by default and prints a warning
+    # naming every package whose postinstall it skipped. See
+    # Get-GitNexusInstallArgs for why the list is a literal and why an older npm
+    # needs no fallback. Measured 2026-09-22: gitnexus 1.6.12 installed and
+    # `analyze` worked WITH the scripts skipped, so this buys the native
+    # dependencies their postinstall - it is not a repair of a broken install.
+    # CHECK BEFORE INSTALLING. Measured across three real runs on one host: this
+    # step re-ran npm's whole dependency resolution every time on a machine that
+    # already had gitnexus, because nothing asked. Every step that WRITES A FILE in
+    # this script already reports "already current"; the package-manager steps did
+    # not, and the repo's README promises an installer that "fills in what is
+    # missing and leaves existing values alone".
+    #
+    # This deliberately changes the semantics from "always upgrade" to "install
+    # when absent". A skip therefore has to print how to get the old behaviour
+    # back, or the capability is simply gone.
+    $have = Get-ToolVersion -Exe 'gitnexus'
+    if ($have) {
+        Write-Host "   already installed - not reinstalling"
+        Write-Host "   to upgrade on purpose: npm install -g gitnexus@latest"
+        return "gitnexus $have already installed"
+    }
+
+    $npmArgs = Get-GitNexusInstallArgs
+    & npm @npmArgs 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "   $_" }
     $v = (& gitnexus --version 2>&1)
-    "gitnexus $v"
+    "gitnexus $v installed"
 }
 
 Step 'GitNexus: register MCP + skills + hooks for Claude Code' {
@@ -968,10 +1119,26 @@ Step 'code-review-graph: pip install with extras' {
     # [embeddings] = numpy + sentence-transformers, required for semantic search.
     # [communities] = igraph; without it the tool falls back to slower file-based
     # community detection and says so in its log.
-    & $python -m pip install --upgrade "code-review-graph[embeddings,communities]" 2>&1 |
+    # Same check-first rule as the npm step above, and the same trade: this stops
+    # being an upgrade. Measured: a re-run re-resolved about 110 packages to print
+    # "Requirement already satisfied" for every one of them.
+    #
+    # pip show is asked of THE SAME interpreter the MCP server will use ($python,
+    # resolved by Resolve-Python), not of whatever `pip` is on PATH - a package
+    # installed for a different interpreter is not installed as far as this
+    # script's own import check is concerned.
+    $shown = (& $python -m pip show code-review-graph 2>&1 | Select-String '^Version:')
+    if ($shown) {
+        Write-Host "   already installed - not reinstalling"
+        Write-Host "   to upgrade on purpose:"
+        Write-Host "     $python -m pip install --upgrade `"code-review-graph[embeddings,communities]`""
+        return "$shown already installed"
+    }
+
+    & $python -m pip install "code-review-graph[embeddings,communities]" 2>&1 |
         Select-Object -Last 4 | ForEach-Object { Write-Host "   $_" }
     $v = (& $python -m pip show code-review-graph 2>&1 | Select-String '^Version:')
-    "$v"
+    "$v installed"
 }
 
 Step 'code-review-graph: import check' {
@@ -1028,7 +1195,24 @@ if ($Repo) {
         $status
     }
 
-    Step 'Repo: first GitNexus index' {
+    # NOT "first index" any more: it skips when the index is already at HEAD, and a
+    # step named "first" that reports ok on its fourth run misreads the summary
+    # table for everyone.
+    Step 'Repo: GitNexus index' {
+        # ~142s on a 1084-file repo, and it ran on EVERY re-run before this check.
+        $meta = Join-Path $Repo '.gitnexus\meta.json'
+        $indexed = $null
+        if (Test-Path $meta) {
+            try { $indexed = (Get-Content $meta -Raw -Encoding UTF8 | ConvertFrom-Json).lastCommit }
+            catch { $indexed = $null }        # unreadable meta = index it, never skip
+        }
+        $head = (& git -C $Repo rev-parse HEAD 2>$null)
+        if (Test-GitNexusIndexCurrent -IndexedCommit $indexed -HeadCommit $head -WantPdg ([bool] $Pdg)) {
+            Write-Host "   index is already at $($head.Substring(0, [Math]::Min(8, $head.Length))) - nothing to do"
+            return 'already at HEAD'
+        }
+        if ($Pdg) { Write-Host "   -Pdg: re-indexing, because nothing on disk proves the PDG layers exist" }
+
         Push-Location $Repo
         try {
             $env:GITNEXUS_WAL_CHECKPOINT_THRESHOLD = '67108864'
@@ -1050,12 +1234,44 @@ if ($Repo) {
         'ok'
     }
 
-    Step 'Repo: first code-review-graph build + embeddings' {
+    # Renamed for the same reason as the GitNexus step above.
+    Step 'Repo: code-review-graph build + embeddings' {
+        # Ask the database, not the file timestamp - see Test-CrgGraphBuilt.
+        $db = Join-Path $Repo '.code-review-graph\graph.db'
+        $nodes = 0
+        $embeds = 0
+        if (Test-Path $db) {
+            $probe = @'
+import sqlite3, sys
+try:
+    c = sqlite3.connect(sys.argv[1])
+    n = c.execute("select count(*) from nodes").fetchone()[0]
+    e = c.execute("select count(*) from embeddings").fetchone()[0]
+    print("%d %d" % (n, e))
+except Exception:
+    print("0 0")
+'@
+            $out = (& $python -c $probe $db 2>&1 | Select-Object -Last 1)
+            $parts = ("$out".Trim() -split '\s+')
+            if ($parts.Count -eq 2) {
+                [int]::TryParse($parts[0], [ref] $nodes) | Out-Null
+                [int]::TryParse($parts[1], [ref] $embeds) | Out-Null
+            }
+        }
+        if (Test-CrgGraphBuilt -NodeCount $nodes -EmbeddingCount $embeds) {
+            Write-Host "   already built: $nodes nodes, $embeds embeddings"
+            # Say what this does NOT assert, so nobody reads the skip as "fresh".
+            Write-Host "   (that it was BUILT, not that it is current - the daemon keeps the"
+            Write-Host "    graph fresh but never embeds new code; re-run embed by hand after"
+            Write-Host "    substantial changes)"
+            return "already built ($nodes nodes, $embeds embeddings)"
+        }
+
         & $python -m code_review_graph build --repo $Repo 2>&1 | Select-Object -Last 4 | ForEach-Object { Write-Host "   $_" }
         # The watch daemon does NOT embed new code, so this is also the command to
         # re-run by hand after substantial changes.
         & $python -m code_review_graph embed --repo $Repo 2>&1 | Select-Object -Last 4 | ForEach-Object { Write-Host "   $_" }
-        'ok'
+        'built'
     }
 
     Step 'Repo: register + start the watch daemon' {

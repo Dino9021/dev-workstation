@@ -581,6 +581,45 @@ The same cause blocks `git worktree remove`, folder deletion, and some IDE refac
 
 ---
 
+### 8.13 VSCode 擴充功能：`Subprocess initialization did not complete within 60000ms`
+
+**先看清楚一件事：這個 60 秒不是 MCP 的超時，是 VSCode 擴充功能給整個子行程初始化的預算。** 而本指南要你設的 `MCP_TIMEOUT` / `MCP_CONNECT_TIMEOUT_MS` 是 **120000**，比它大一倍。
+
+⚠️ **不要為了這個錯誤把 `MCP_TIMEOUT` 調小。** 第 4.1 節量過：裝了 `embeddings` extra 之後 code-review-graph 的握手要 **31.33 秒**（模型預載是作者刻意的，Windows 上改成延後載入會永久卡死）。調到 60000 以下，換來的是 code-review-graph 連不上。
+
+**2026-09-22 在另一台主機上抓到的實際日誌說原因不是這兩台伺服器**：
+
+| 日誌證據 Evidence in the log | 意思 What it means |
+|---|---|
+| `[MCP] --mcp-config servers running fully async (nonblocking)` | MCP 伺服器不擋 session 初始化 / they do not block init |
+| `[Bootstrap] Fetch failed: ECONNABORTED`<br>`Failed to fetch MCP registry: timeout of 5000ms exceeded` | 連 `api.anthropic.com` 卡住 —— 錯誤訊息自己說的 "check network connectivity" / the network half of the message is the real one |
+| `Failed to save config with lock: Lock file is already being held`<br>`Config lock still held by a live process after retries`（`gh-73364`） | 擴充功能在 120 毫秒內**spawn 了兩次**，兩個行程搶 `.claude.json` 的鎖（整份日誌每一行都是雙份）/ a double spawn racing on the config lock |
+
+**這個安裝器裝的 `SessionStart` hook 不是原因**，已經查過：它是 `graph-refresh.ps1 -Which both -Detach`，`-Detach` 會 `Start-Process` 之後立刻 `exit 0`（腳本自己量過 0.8 秒），而且 `settings.json` 裡給它的 `timeout` 只有 **10** 秒。
+
+**該怎麼辦**：
+
+1. **重試一次。** 安裝後的第一個 session 最慢 —— embeddings 模型還沒進快取。
+2. **確認到 `api.anthropic.com` 的連線**（公司 proxy、TLS 檢查、DNS）。
+3. **不要動 `MCP_TIMEOUT`**（理由同上）。
+4. 還是重現就跑 `claude --debug mcp`，並且注意日誌是不是每行都雙份 —— 雙份就是 spawn 兩次，那是擴充功能的問題，不是這裡的設定。
+
+⚠️ **證據的來源要說清楚**：上面那份日誌來自**另一台**工作站（不同的 `%USERPROFILE%`、不同的專案目錄，GitNexus 同時掛著 3 個 repo）。**這台機器上沒有重現過**，所以以上是那份日誌的診斷，不是對這台機器的量測。
+
+---
+
+**The 60 s is not an MCP timeout** — it is the VSCode extension's budget for the whole subprocess init, and the `MCP_TIMEOUT` / `MCP_CONNECT_TIMEOUT_MS` this guide sets is **120000**, twice as large.
+
+⚠️ **Do not lower `MCP_TIMEOUT` to fix this error.** Section 4.1 measured code-review-graph's handshake at **31.33 s** with the `embeddings` extra (the eager model preload is deliberate — lazy loading deadlocks on Windows). Anything under 60000 buys a code-review-graph that cannot connect.
+
+**A real log captured on another host, 2026-09-22, says neither server is the blocker** — see the table above: the MCP servers are explicitly non-blocking, while the network fetches to `api.anthropic.com` abort and a double spawn fights over the config lock. **The `SessionStart` hook this installer adds is also ruled out**: `-Detach` returns in 0.8 s and `settings.json` caps it at 10 s.
+
+**What to do:** retry first (the session right after install is the slow one, cold model cache); check reachability to `api.anthropic.com`; leave `MCP_TIMEOUT` alone; then `claude --debug mcp`, watching for doubled log lines, which mean the extension spawned twice and the configuration here is not involved.
+
+⚠️ **Provenance:** that log is from a DIFFERENT workstation (another `%USERPROFILE%`, another project directory, GitNexus holding 3 repos at once). It has **not** been reproduced on this host, so the above is a diagnosis of that log, not a measurement of this machine.
+
+---
+
 ## 9. 移除 | Uninstall
 
 ```powershell

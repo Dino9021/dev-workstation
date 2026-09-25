@@ -31,6 +31,10 @@ justification; if two instructions conflict, resolve the conflict in the text.
 10. Preserve existing architecture.
 11. Question real contradictions.
 12. Otherwise execute directly.
+13. Reply to the owner in Traditional Chinese (正體中文); a file keeps the language it
+    already uses.
+14. Never make the owner go back and find something in earlier conversation. Restate it
+    where you refer to it: name every item, or give the path and line.
 
 ## Pending items — one file, every session
 

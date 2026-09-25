@@ -676,7 +676,19 @@ def settings_keys():
     if not os.path.exists(path):
         return "- `%s` does not exist; plugin keys not added.\n" % path
     try:
-        data = json.load(io.open(path, encoding="utf-8"))
+        # ⛔ utf-8-SIG, NOT utf-8. This file belongs to other writers - `gitnexus
+        # setup` and PowerShell both touch it - and a Windows tool writes JSON with
+        # a UTF-8 BOM. Measured 2026-09-22: after a graph-servers install this file
+        # began EF BB BF, `json.load` with plain utf-8 raised "Unexpected UTF-8
+        # BOM", and this function reported "does not parse; left alone" - silently
+        # skipping the dispatch-guard keys on a file Claude Code itself reads
+        # perfectly well. utf-8-sig reads both, so the tolerant read is the correct
+        # one for a file we do not own.
+        #
+        # write_text() below then writes it back WITHOUT a BOM, which is a
+        # deliberate normalisation: every strict reader can then read it, and the
+        # backup holds the original either way.
+        data = json.load(io.open(path, encoding="utf-8-sig"))
     except ValueError as e:
         return "- ⛔ `%s` does not parse (%s); left alone.\n" % (path, e)
     name, source = MARKETPLACE
