@@ -7,6 +7,12 @@
   It is USER-scope: it fires in every project, so every step is guarded by "does
   this repo actually have that index".
 
+  NEEDS POWERSHELL 7. Both callers start it with `powershell` (5.1), so it
+  re-launches itself under pwsh and refuses when no PowerShell 7 is installed. The
+  root install.ps1 installs PowerShell 7 before anything else, so that refusal only
+  reaches a machine where somebody removed it afterwards - and post-commit exits 0
+  regardless, so no `git commit` ever fails over it.
+
   WHY DETACHED (-Detach). Both refreshes are far too slow to block a session.
   Measured 2026-08-17 on a 1084-file repo (302 of them code files):
       code_review_graph update ....... 7s cold, 3s steady
@@ -33,7 +39,53 @@ $logFile = Join-Path $env:TEMP 'claude-graph-refresh.log'
 function Write-Log([string] $Message) {
     # Silent failure cost us hours once (a wrong python path produced no output at
     # all). Every give-up path leaves one line here.
-    "$(Get-Date -Format 's') [$Which] $Message" | Add-Content -Path $logFile -Encoding utf8
+    # $Repo is in every line: this script is user-scope and fires in every project,
+    # so seven "[both] analyze exit 1" lines without it named no repository at all.
+    "$(Get-Date -Format 's') [$Which] [$Repo] $Message" | Add-Content -Path $logFile -Encoding utf8
+}
+
+# --- PowerShell 7 gate ------------------------------------------------------
+# Both callers start this with `powershell` (5.1): .git/hooks/post-commit, and the
+# user-scope SessionStart hook. 5.1 and 7 differ where 5.1 does not fail but returns
+# something wrong, so settle the edition rather than hope - the root install.ps1
+# installs PowerShell 7 before anything else, so it is there on every machine this
+# repository set up.
+#
+# The -ge 7 filter is what stops a relaunch loop: a `pwsh` that is PowerShell 6 would
+# fail this same gate and relaunch itself for ever. Same shape as the gate in
+# graph-servers/install.ps1.
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    $pwsh = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue |
+            Where-Object { $_.Version -and $_.Version.Major -ge 7 } |
+            Select-Object -First 1 -ExpandProperty Source
+    # Installed a moment ago = on disk but not yet on THIS shell's PATH.
+    if (-not $pwsh) {
+        $probe = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+        if (Test-Path -LiteralPath $probe) { $pwsh = $probe }
+    }
+    if (-not $pwsh) {
+        # Refuse, loudly, in the one place a hook's output survives. post-commit
+        # exits 0 regardless, so this never fails anybody's `git commit`.
+        Write-Log "PowerShell 7 not found (running $($PSVersionTable.PSVersion)) - refresh skipped. winget install --id Microsoft.PowerShell"
+        Write-Error "graph-refresh.ps1 needs PowerShell 7 - see $logFile"
+        exit 1
+    }
+    $fwd = @()
+    foreach ($kv in $PSBoundParameters.GetEnumerator()) {
+        if ($kv.Value -is [switch]) {
+            if ($kv.Value.IsPresent) { $fwd += "-$($kv.Key)" }
+            continue
+        }
+        $v = [string] $kv.Value
+        # A tab-completed directory arrives as `-Repo "C:\my repo\"`, and inside
+        # quotes that trailing backslash escapes the closing quote. Double it.
+        if ($v.Contains(' ') -and $v -match '(\\+)$') { $v += $Matches[1] }
+        $fwd += "-$($kv.Key)"; $fwd += $v
+    }
+    & $pwsh -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath @fwd
+    # & can fail to LAUNCH and leave $LASTEXITCODE untouched; `exit $null` is exit 0.
+    if ($null -eq $LASTEXITCODE) { exit 1 }
+    exit $LASTEXITCODE
 }
 
 # --- interpreter ------------------------------------------------------------
@@ -50,7 +102,12 @@ $env:GITNEXUS_WAL_CHECKPOINT_THRESHOLD = '67108864'
 # --- detach -----------------------------------------------------------------
 if ($Detach) {
     $self = $MyInvocation.MyCommand.Path
-    Start-Process -FilePath 'powershell' -WindowStyle Hidden -ArgumentList @(
+    # The RUNNING interpreter, not the literal 'powershell'. The gate above already
+    # put us on PowerShell 7, so the child starts there too and pays no second
+    # re-launch; hardcoding 'powershell' would send it back through 5.1 every time.
+    $interpreter = (Get-Process -Id $PID).Path
+    if (-not $interpreter) { $interpreter = 'pwsh' }
+    Start-Process -FilePath $interpreter -WindowStyle Hidden -ArgumentList @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$self`"",
         '-Which', $Which, '-Repo', "`"$Repo`""
     )
@@ -117,8 +174,21 @@ if ($Which -in @('gitnexus', 'both')) {
             # session. Bounded, so a burst of commits cannot spin here.
             for ($pass = 0; $pass -lt 3; $pass++) {
                 $head = (& git -C $Repo rev-parse HEAD 2>$null)
-                $indexed = (Get-Content $meta -Raw | ConvertFrom-Json).lastCommit
-                if (-not $head -or -not $indexed -or $head -eq $indexed) { break }
+                if (-not $head) { Write-Log 'git rev-parse HEAD gave nothing - refresh skipped'; break }
+                # NOT ConvertFrom-Json. gitnexus writes unresolvedReceiverMembers.counts
+                # keyed by the method names it found, and a polyglot repo produces pairs
+                # that differ only by case (Clear/clear, Get/get, Start/start). 5.1 then
+                # throws DuplicateKeysInJsonString and 7 "keys with different casing".
+                # Neither stops the script: $indexed came back empty, the loop broke, and
+                # the refresh did NOTHING on every commit while both hooks looked healthy.
+                # Measured 2026-10-06 on a repo with six such pairs. -AsHashtable is not
+                # the fix - 5.1 has no such switch, and both callers run 5.1.
+                # "lastCommit" occurs once in that file, at the top level.
+                $m = [regex]::Match((Get-Content -LiteralPath $meta -Raw),
+                                    '"lastCommit"\s*:\s*"([0-9a-fA-F]{7,40})"')
+                if (-not $m.Success) { Write-Log "cannot read lastCommit from $meta - refresh skipped"; break }
+                $indexed = $m.Groups[1].Value
+                if ($head -eq $indexed) { break }
                 # --skip-agents-md: without it, analyze appends its own block to
                 # CLAUDE.md and AGENTS.md. This runs from post-commit, so EVERY commit
                 # would rewrite the project's shared instruction file, silently, and

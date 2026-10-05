@@ -1110,7 +1110,17 @@ Step 'GitNexus: npm global install' {
 Step 'GitNexus: register MCP + skills + hooks for Claude Code' {
     # `setup` writes the MCP entry, the PreToolUse/PostToolUse hook entries in
     # ~/.claude/settings.json, and the per-repo .claude/skills/gitnexus/ files.
-    & gitnexus setup -c claude-code 2>&1 | Select-Object -Last 6 | ForEach-Object { Write-Host "   $_" }
+    #
+    # -c claude, NOT claude-code. gitnexus 1.6.12 accepts cursor, claude, antigravity,
+    # opencode, codebuddy, qoder, codex; `claude-code` printed "Unknown: claude-code"
+    # and exited 1 - and this step still reported ok, because nothing read the exit
+    # code. It went unnoticed only because an earlier run had already registered the
+    # server. Measured 2026-10-06: exit 1 on an unknown value, so $LASTEXITCODE alone
+    # is enough and no text match is needed.
+    & gitnexus setup -c claude 2>&1 | Select-Object -Last 6 | ForEach-Object { Write-Host "   $_" }
+    # The message does NOT repeat the argument: a mutation test that changes the
+    # argument would otherwise print a line naming the value it did not run.
+    if ($LASTEXITCODE -ne 0) { throw "gitnexus setup exited $LASTEXITCODE (see output above)" }
     'ok'
 }
 
@@ -1203,8 +1213,15 @@ if ($Repo) {
         $meta = Join-Path $Repo '.gitnexus\meta.json'
         $indexed = $null
         if (Test-Path $meta) {
-            try { $indexed = (Get-Content $meta -Raw -Encoding UTF8 | ConvertFrom-Json).lastCommit }
-            catch { $indexed = $null }        # unreadable meta = index it, never skip
+            # Regex, not ConvertFrom-Json - the same defect graph-refresh.ps1 carries the
+            # measurement for: meta.json's unresolvedReceiverMembers.counts can hold keys
+            # differing only by case, which ConvertFrom-Json refuses in BOTH editions.
+            # Here the catch merely re-indexed for 142s and never said why; in the hook
+            # the same throw made the refresh a silent no-op. $indexed stays $null when
+            # the field is unreadable - unreadable meta = index it, never skip.
+            $m = [regex]::Match((Get-Content $meta -Raw -Encoding UTF8),
+                                '"lastCommit"\s*:\s*"([0-9a-fA-F]{7,40})"')
+            if ($m.Success) { $indexed = $m.Groups[1].Value }
         }
         $head = (& git -C $Repo rev-parse HEAD 2>$null)
         if (Test-GitNexusIndexCurrent -IndexedCommit $indexed -HeadCommit $head -WantPdg ([bool] $Pdg)) {
