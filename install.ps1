@@ -34,7 +34,16 @@
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo C:\code\my-project
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -SkipDeps
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -LogPath C:\logs\ws.log
+      powershell -ExecutionPolicy Bypass -File .\install.ps1 -Cowork yes
+      powershell -ExecutionPolicy Bypass -File .\install.ps1 -Cowork no
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -SelfTest
+
+  THE ONE QUESTION. claude-mem Cowork is the cloud half of claude-mem - its own
+  marketplace entry says its hooks "stream tool use to cmem.ai" - so it is never
+  installed without a decision. -Cowork yes/no settles it from the command line.
+  Given neither, the run ASKS ONCE, at the very start, after printing what it is
+  about to do and BEFORE installing anything: 30 seconds, and no answer means no.
+  With stdin redirected it does not ask at all and the answer is no.
 
   DELIBERATELY NOT HERE:
 
@@ -84,6 +93,15 @@ param(
     # silently is worse than no flag, because the name keeps promising the same
     # thing while the behaviour moves underneath it.
     [switch] $All,
+    # claude-mem Cowork (claude-mem-cowork@thedotmack) - the CLOUD half of
+    # claude-mem. Its own marketplace entry: "hooks stream tool use to cmem.ai".
+    # That is an external service, so it is never installed without a decision.
+    #
+    # A STRING, NOT A SWITCH, and deliberately: a switch has two states and this
+    # has three. `ask` has to be distinguishable from `no`, and `-Cowork:$false`
+    # would be dropped by Get-ForwardArgs on the way to the PowerShell 7 child,
+    # which would then ask a question the user had already answered.
+    [ValidateSet('ask', 'yes', 'no')] [string] $Cowork = 'ask',
     [switch] $SelfTest,
     # Probes the pinned download URLs with a HEAD request and installs nothing.
     # Separate from -SelfTest on purpose: -SelfTest must stay offline and pure, and
@@ -188,6 +206,84 @@ function Get-ClaudeMemState {
     return 'absent'
 }
 
+function ConvertTo-YesNo {
+    <#
+      The answer parser for the Cowork question, split out so -SelfTest can
+      exercise it with no console attached. Returns 'yes', 'no', or $null for
+      "that was not an answer, keep waiting".
+
+      Enter and Esc are 'no' on purpose: the default is no, and the two keys a
+      person presses to mean "just get on with it" must not mean yes.
+    #>
+    param([string] $Text, [int] $VirtualKeyCode = 0)
+    if ($Text -match '^[Yy]$') { return 'yes' }
+    if ($Text -match '^[Nn]$') { return 'no' }
+    if ($VirtualKeyCode -eq 13 -or $VirtualKeyCode -eq 27) { return 'no' }
+    return $null
+}
+
+function Read-CoworkAnswer {
+    <#
+      Asks once, at the start of the run, and returns 'yes' or 'no' - never 'ask'.
+
+      ⛔ THE REDIRECTED-STDIN GATE IS NOT AN OPTIMISATION. Measured 2026-10-06 on
+      this host: with stdin redirected, $Host.UI.RawUI.KeyAvailable does NOT
+      throw - it returns $false for ever. So without this gate every scripted,
+      CI or wrapper-launched run would stall for the whole countdown and then
+      carry on anyway. The answer there is no, and it says why.
+
+      The buffer is flushed first for the same measured reason: a key sent before
+      the loop started was read 0.2s into it and taken as the answer. A stray
+      Enter from launching the script must not answer a question nobody saw.
+    #>
+    param([int] $Seconds = 30)
+
+    if ([Console]::IsInputRedirected) {
+        Write-Host "   stdin is not a terminal, so there is nobody to ask: NOT installing it." -ForegroundColor Yellow
+        Write-Host "   Pass -Cowork yes to install it in an unattended run."
+        return 'no'
+    }
+
+    try { $Host.UI.RawUI.FlushInputBuffer() } catch { }
+
+    # Not every host has a readable key queue. Where there is none, there is no
+    # countdown either - block and wait, which is better than guessing.
+    $timed = $true
+    try { $null = $Host.UI.RawUI.KeyAvailable } catch { $timed = $false }
+
+    if (-not $timed) {
+        while ($true) {
+            $typed = Read-Host "   Install claude-mem Cowork? (Y/N, empty = N)"
+            if ($typed.Trim() -eq '') { return 'no' }
+            $answer = ConvertTo-YesNo $typed.Trim().Substring(0, 1)
+            if ($answer) { return $answer }
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($Host.UI.RawUI.KeyAvailable) {
+            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            $answer = ConvertTo-YesNo ([string] $key.Character) $key.VirtualKeyCode
+            if ($answer -eq 'yes') {
+                Write-Host "`r   Y - Cowork WILL be installed.                                        " -ForegroundColor Yellow
+                return 'yes'
+            }
+            if ($answer -eq 'no') {
+                Write-Host "`r   N - Cowork will NOT be installed.                                    " -ForegroundColor Green
+                return 'no'
+            }
+        }
+        else {
+            $left = [int] [Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+            Write-Host ("`r   press Y or N - {0,2}s left, and no answer means N ... " -f $left) -NoNewline
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    Write-Host "`r   no answer in $Seconds seconds - Cowork will NOT be installed.        " -ForegroundColor Green
+    return 'no'
+}
+
 function Test-DispatchGuardInstalled {
     <#
       Is the plugin ALREADY there? Both halves must be true, because either one
@@ -236,6 +332,10 @@ function Test-DispatchGuardInstalled {
 $script:transcribing = $false
 $script:logFile = $null
 $script:prevConsoleEncoding = $null
+# Set only on the path that actually asks the Cowork question. Declared here so the
+# test that reads it is reading a variable, not relying on an unassigned one being
+# $null - which is the same answer right up until somebody adds Set-StrictMode.
+$script:coworkAsked = $false
 
 function Start-RunLog {
     param([string] $Path)
@@ -390,6 +490,25 @@ function Invoke-SelfTest {
     $plain = Get-ForwardArgs @{ Repo = 'C:\norepo\' }
     Check 'a path without a space is left alone' ($plain[1] -eq 'C:\norepo\')
 
+    # The Cowork answer parser. Y is the ONLY thing that means yes; every key a
+    # person presses to dismiss a prompt has to land on no, and anything else has
+    # to leave the countdown running rather than be taken as an answer.
+    Check 'cowork: Y means yes'              ((ConvertTo-YesNo 'Y') -eq 'yes')
+    Check 'cowork: lowercase y means yes'    ((ConvertTo-YesNo 'y') -eq 'yes')
+    Check 'cowork: N means no'               ((ConvertTo-YesNo 'N') -eq 'no')
+    Check 'cowork: Enter means no'           ((ConvertTo-YesNo '' 13) -eq 'no')
+    Check 'cowork: Esc means no'             ((ConvertTo-YesNo '' 27) -eq 'no')
+    # THE LOOKALIKE. 'yes' as a word must not answer on its 'y', or a key that is
+    # not an answer would end the countdown early.
+    Check 'cowork: a stray letter is NOT an answer' ($null -eq (ConvertTo-YesNo 'k'))
+    Check 'cowork: a digit is NOT an answer'        ($null -eq (ConvertTo-YesNo '7'))
+    Check 'cowork: an empty keypress is NOT an answer' ($null -eq (ConvertTo-YesNo ''))
+
+    # The forwarding trap this parameter exists to dodge: a switch bound to $false
+    # vanishes on the way to the PowerShell 7 child, a string does not.
+    $cw = Get-ForwardArgs @{ Cowork = 'no' }
+    Check 'cowork: -Cowork no survives the relaunch' (($cw.Count -eq 2) -and ($cw[0] -eq '-Cowork') -and ($cw[1] -eq 'no'))
+
     $probe = @(@{ Exe = 'cmd' }, @{ Exe = 'no-such-tool-b7f3a1' })
     $miss = Get-MissingDependency $probe
     Check 'missing tools detected, present ones not' (($miss.Count -eq 1) -and ($miss[0].Exe -eq 'no-such-tool-b7f3a1'))
@@ -540,6 +659,39 @@ if ($CheckOnly) {
     Write-Host "CHECK ONLY - nothing will be installed or written, apart from this log" -ForegroundColor Yellow
 }
 
+# --------------------------------------------------- the plan, and the one question
+# ASKED HERE, BEFORE ANYTHING IS INSTALLED, and never again later in the run. A
+# question raised forty minutes in, behind a third-party installer's output, is a
+# question nobody is still sitting there to answer.
+#
+# Printed only when there is actually something to ask. Given -Cowork explicitly
+# there is nothing to decide, and the PowerShell 7 child is always given it
+# explicitly - which is what stops this block running twice in one run.
+if ($Cowork -eq 'ask' -and -not $CheckOnly) {
+    Write-Host ""
+    Write-Host "This run will, in order:" -ForegroundColor Cyan
+    Write-Host "   1. install PowerShell 7 if it is missing, and continue under it"
+    Write-Host "   2. install any MISSING toolchain tool: git, node, python, claude"
+    Write-Host "   3. place the CLAUDE.md instruction files (Tools\deploy.py)"
+    Write-Host "   4. install GitNexus and code-review-graph, their MCP entries and hooks"
+    Write-Host "   5. install claude-mem - LOCAL cross-session memory, nothing uploaded"
+    if ($All) {
+        Write-Host "   6. -All: install dispatch-guard (statusline + usage watcher, machine-wide)"
+    }
+    Write-Host "   Anything already installed is left alone, never replaced."
+    Write-Host ""
+    Write-Host "One optional extra - and this is the only question this script asks:" -ForegroundColor Cyan
+    Write-Host "   claude-mem Cowork  (claude-mem-cowork@thedotmack)"
+    Write-Host "   Its own marketplace entry describes it as: 'Claude-Mem for Cowork"
+    Write-Host "   (Claude app cloud sessions) - hooks stream tool use to cmem.ai and"
+    Write-Host "   inject observations into new sessions and agents'."
+    Write-Host "   It therefore SENDS YOUR TOOL USE TO AN EXTERNAL SERVICE (cmem.ai)." -ForegroundColor Yellow
+    Write-Host "   Step 5's local claude-mem does not, and does not need this. Default: N."
+    Write-Host ""
+    $Cowork = Read-CoworkAnswer 30
+    $script:coworkAsked = $true
+}
+
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Phase "PowerShell 7"
     # The -ge 7 filter is what stops a relaunch loop: a pwsh that is PowerShell 6
@@ -591,6 +743,15 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     $bound = @{}
     foreach ($kv in $PSBoundParameters.GetEnumerator()) { $bound[$kv.Key] = $kv.Value }
     $bound['LogPath'] = $script:logFile
+    # ALWAYS bound. Unbound it would simply be missing from the child's command
+    # line, and the child would ask the question a second time - after the user
+    # had already answered it on this side of the handover.
+    #
+    # It is 'yes' or 'no' on a real run, because the block above resolved it.
+    # Under -CheckOnly it is still 'ask', and that is correct: nothing is being
+    # installed, so nothing was asked, and the child's report says "a real run
+    # would ASK". 'ask' therefore DOES cross the handover - on that path only.
+    $bound['Cowork'] = $Cowork
     $fwd = Get-ForwardArgs $bound
     Stop-RunLog
     & $pwshPath -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath @fwd
@@ -600,6 +761,14 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     # exit 0: we would report success having done nothing. Fail closed.
     if ($null -eq $LASTEXITCODE) { exit 1 }
     exit $LASTEXITCODE
+}
+
+# Said AFTER the handover, so one run says it once: the 5.1 half exits above, and
+# the PowerShell 7 half is the one that gets here. Skipped when the question was
+# just asked, which already printed the answer.
+if ($Cowork -ne 'ask' -and -not $script:coworkAsked) {
+    Write-Host ""
+    Write-Host "claude-mem Cowork: $Cowork (from -Cowork $Cowork)" -ForegroundColor Cyan
 }
 
 # ------------------------------------------------------------ phase 2: the toolchain
@@ -776,8 +945,19 @@ if ($CheckOnly) {
     Write-Host "   claude-mem would then be installed (default, not behind a flag):" -ForegroundColor Yellow
     Write-Host "     npx claude-mem install --provider claude --runtime worker"
     Write-Host "     claude plugin marketplace add thedotmack/claude-mem"
-    Write-Host "     claude plugin install claude-mem-cowork@thedotmack"
     Write-Host "     npx claude-mem start      <- skipped by the installer in a script"
+    # Three outcomes, and this block is the ONLY place phases 4-6 get reported, so
+    # a fixed line here would misreport two of them.
+    switch ($Cowork) {
+        'yes' { Write-Host "   -Cowork yes: it would ALSO install the cloud plugin:" -ForegroundColor Yellow
+                Write-Host "     claude plugin install claude-mem-cowork@thedotmack" }
+        'no'  { Write-Host "   -Cowork no: the cloud plugin would NOT be installed." -ForegroundColor Green }
+        default {
+                Write-Host "   claude-mem Cowork: a real run would ASK, once, before installing" -ForegroundColor Yellow
+                Write-Host "   anything - 30 seconds, and no answer means no. It streams tool use"
+                Write-Host "   to cmem.ai, so it is never installed without a decision."
+                Write-Host "   -Cowork yes / -Cowork no answers it up front and skips the question." }
+    }
     Write-Host "   The first of those MAY ask a question in a real terminal (cloud tier vs"
     Write-Host "   local); the real run explains it before starting. Answer: local."
     if ($All) {
@@ -920,8 +1100,22 @@ else {
 # are already there.
 & claude plugin marketplace add thedotmack/claude-mem 2>&1 |
     Select-Object -Last 3 | ForEach-Object { Write-Host "   $_" }
-& claude plugin install claude-mem-cowork@thedotmack 2>&1 |
-    Select-Object -Last 3 | ForEach-Object { Write-Host "   $_" }
+
+# The CLOUD half, and the only thing in this script that is not installed by
+# default. The answer was settled at the top of the run, before anything was
+# installed; nothing here asks.
+if ($Cowork -eq 'yes') {
+    Write-Host "   Cowork: yes - installing the cloud plugin" -ForegroundColor Yellow
+    & claude plugin install claude-mem-cowork@thedotmack 2>&1 |
+        Select-Object -Last 3 | ForEach-Object { Write-Host "   $_" }
+}
+else {
+    Write-Host "   Cowork: no - claude-mem-cowork@thedotmack was NOT installed" -ForegroundColor Green
+    Write-Host "   (it streams tool use to cmem.ai; the local memory above does not)"
+    Write-Host "   to add it later:    .\install.ps1 -Cowork yes"
+    Write-Host "   to remove an older install:"
+    Write-Host "     claude plugin uninstall claude-mem-cowork@thedotmack"
+}
 
 # Read the state back rather than trusting any installer's own success text.
 if ((Get-ClaudeMemState) -eq 'running') {

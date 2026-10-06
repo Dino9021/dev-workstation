@@ -29,7 +29,7 @@ One command turns a bare Windows host into a working Claude Code development env
 | 資料夾 | 裝什麼 |
 |---|---|
 | [`graph-servers/`](graph-servers/) | 兩台程式圖譜 MCP 伺服器：**GitNexus** 與 **code-review-graph**。含自動更新索引的 refresh hook、每次 commit 後觸發的 post-commit hook，以及第一次建索引與背景監看服務 |
-| [`claude-mem/`](claude-mem/) | **claude-mem**，跨 session 的記憶。預設就裝。腳本化安裝需要四條指令，其中一條幾乎所有人都會漏掉；也說明它跟專案自己的 `Memory/` 資料夾要怎麼區分 |
+| [`claude-mem/`](claude-mem/) | **claude-mem**，跨 session 的記憶。預設就裝。腳本化安裝需要三條指令，其中一條幾乎所有人都會漏掉；也說明它跟專案自己的 `Memory/` 資料夾要怎麼區分 |
 | [`general-claude-md/`](general-claude-md/) | 三份給 AI 代理讀的指令檔：`user-CLAUDE.md` 放到 `~/.claude/CLAUDE.md`（整台機器每個專案都載入）、`VERIFICATION-LESSONS.md` 放到 `~/.claude/docs/`、`project-CLAUDE.md` 是每個專案自己的 `CLAUDE.md` 範本 |
 | [`parallel-agent-operations/`](parallel-agent-operations/) | 一段可貼進 `CLAUDE.md` 的規則，阻止 AI 代理自作主張一次派出幾十個子代理——它看不到自己會燒掉多少額度 |
 | [`Tools/`](Tools/) | [`deploy.py`](Tools/deploy.py) 負責放置上面那三份指令檔：有 manifest 記錄、會先備份、**不會覆蓋你自己改過的檔案**。[`test_deploy.py`](Tools/test_deploy.py) 是它的測試 |
@@ -57,7 +57,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 2. **工具鏈**——`git`、`node`、`python`、`claude`。有 winget 套件的走 winget，沒有的用原廠靜默安裝檔
 3. **指令檔**——`Tools/deploy.py` 放置使用者層級的兩份與專案層級的範本
 4. **圖譜伺服器**——`graph-servers/install.ps1` 裝兩台伺服器、註冊 MCP、掛 refresh hook 與 post-commit hook、建第一次索引、啟動背景監看服務
-5. **claude-mem**——跨 session 記憶
+5. **claude-mem**——跨 session 記憶，純本機
 
 加上 `-All` 會多裝第六項 `dispatch-guard`。它預設不裝，因為它伸手到這個專案以外：會為整台機器裝一條狀態列和一個背景額度監看工作。不加 `-All` 時，腳本會在最後把那三條指令印出來讓你自己決定。
 
@@ -71,6 +71,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 | `-SkipDeps` | 不安裝任何缺少的工具，只做設定 |
 | `-LogPath <路徑>` | 改變 log 位置 |
 | `-All` | 連 `dispatch-guard` 一起裝 |
+| `-Cowork yes` / `-Cowork no` | 直接回答「要不要裝 claude-mem Cowork」，腳本就不會問。見下方說明 |
 | `-SelfTest` | 離線自我測試，不碰任何東西，連 log 都不寫 |
 | `-CheckUrls` | 檢查釘住的下載網址是否還活著 |
 
@@ -79,6 +80,19 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo C:\code\my-project
 ```
+
+### 它只會問你一件事
+
+整個安裝流程只有一個問題：**要不要裝 claude-mem Cowork（`claude-mem-cowork@thedotmack`）**。
+
+它是 claude-mem 的**雲端**那一半。它自己的 marketplace 說明寫著：hooks「stream tool use to cmem.ai and inject observations into new sessions and agents」——也就是**會把你的工具使用紀錄送到外部服務 cmem.ai**。第 5 步裝的本機 claude-mem 不會，也不需要它。所以它不在預設裡。
+
+這個問題**問在整個安裝的最前面**，在腳本印出它接下來要做哪些事之後、在它動手裝任何東西之前。不會等到跑了四十分鐘才突然冒出來問你。
+
+- 按 `Y` 才裝。按 `N`、按 Enter、按 Esc，或 **30 秒不回答，都是不裝**。
+- 用 `-Cowork yes` 或 `-Cowork no` 就完全不會問。
+- **stdin 不是終端機時（腳本、CI、被其他工具啟動）它不會問，直接不裝**，也不會卡在那裡等 30 秒。要在無人職守的情況下裝它，請明確加上 `-Cowork yes`。
+- 事後要加：`.\install.ps1 -Cowork yes`。事後要移除：`claude plugin uninstall claude-mem-cowork@thedotmack`。
 
 ### 它會改動哪些檔案
 
@@ -147,7 +161,7 @@ from now, on another machine, it still installs."
 | Folder | Sets up |
 |---|---|
 | [`graph-servers/`](graph-servers/) | Two code-graph MCP servers — **GitNexus** and **code-review-graph** — with the refresh hook that keeps their indexes current, the post-commit hook that triggers it, the first index and the watch daemon |
-| [`claude-mem/`](claude-mem/) | **claude-mem**, cross-session memory, installed by default. The four commands a scripted install needs, one of which nearly everybody leaves out, and how to keep it from being confused with a project's own `Memory/` folder |
+| [`claude-mem/`](claude-mem/) | **claude-mem**, cross-session memory, installed by default. The three commands a scripted install needs, one of which nearly everybody leaves out, and how to keep it from being confused with a project's own `Memory/` folder |
 | [`general-claude-md/`](general-claude-md/) | Three instruction files for an AI agent: `user-CLAUDE.md` goes to `~/.claude/CLAUDE.md` (loaded in every project on the machine), `VERIFICATION-LESSONS.md` to `~/.claude/docs/`, and `project-CLAUDE.md` is the template for each project's own `CLAUDE.md` |
 | [`parallel-agent-operations/`](parallel-agent-operations/) | A `CLAUDE.md` rule that stops an agent fanning out into dozens of subagents on its own — it cannot see the session budget it would burn |
 | [`Tools/`](Tools/) | [`deploy.py`](Tools/deploy.py) places those three instruction files: manifest-tracked, backed up first, and it **never overwrites a file you edited**. [`test_deploy.py`](Tools/test_deploy.py) is its test suite |
@@ -184,7 +198,7 @@ to it.
 4. **Graph servers** — `graph-servers/install.ps1` installs both servers, registers the MCP
    entries, wires the refresh and post-commit hooks, builds the first index and starts the
    watch daemon
-5. **claude-mem** — cross-session memory
+5. **claude-mem** — cross-session memory, local only
 
 `-All` adds a sixth: `dispatch-guard`. It is off by default because it reaches past this
 project — it installs a statusline and a background usage watcher for the whole machine.
@@ -200,6 +214,7 @@ Without `-All` the script prints its three commands at the end instead of runnin
 | `-SkipDeps` | Install no missing tools; configure only |
 | `-LogPath <path>` | Move the transcript |
 | `-All` | Also install `dispatch-guard` |
+| `-Cowork yes` / `-Cowork no` | Answers the one question up front, so the script does not ask. See below |
 | `-SelfTest` | Offline self-test. Touches nothing, not even the log |
 | `-CheckUrls` | Are the pinned download URLs still alive? |
 
@@ -211,6 +226,27 @@ actually want to work in. Name it explicitly:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo C:\code\my-project
 ```
+
+### The one question it asks
+
+The whole install asks exactly one thing: **install claude-mem Cowork
+(`claude-mem-cowork@thedotmack`) or not?**
+
+It is the **cloud** half of claude-mem. Its own marketplace entry says its hooks "stream
+tool use to cmem.ai and inject observations into new sessions and agents" — it **sends your
+tool use to an external service**. The local claude-mem from step 5 does not, and does not
+need it. So it is not part of the default.
+
+The question comes **at the very start**, after the script has printed what it is about to
+do and before it installs anything. It does not surface forty minutes in.
+
+- Only `Y` installs it. `N`, Enter, Esc, and **no answer for 30 seconds all mean no**.
+- `-Cowork yes` or `-Cowork no` skips the question entirely.
+- **With stdin not a terminal** — a script, CI, launched by another tool — **it does not
+  ask and does not install it**, and it does not stall for the countdown either. To install
+  it unattended, pass `-Cowork yes` explicitly.
+- Add it later with `.\install.ps1 -Cowork yes`; remove it with
+  `claude plugin uninstall claude-mem-cowork@thedotmack`.
 
 ### What it writes
 

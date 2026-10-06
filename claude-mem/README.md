@@ -13,15 +13,34 @@
 
 ## 1. 安裝 | Installing
 
-根目錄的 `install.ps1` 會做這四步。手動做的話：
+根目錄的 `install.ps1` 會做這三步。手動做的話：
 
-The root `install.ps1` runs these four steps. By hand:
+The root `install.ps1` runs these three steps. By hand:
 
 ```powershell
 npx claude-mem install --provider claude --runtime worker
 claude plugin marketplace add thedotmack/claude-mem
-claude plugin install claude-mem-cowork@thedotmack
 npx claude-mem start
+```
+
+### ⚠️ 雲端外掛 Cowork 不在預設裡 | The Cowork cloud plugin is NOT part of this
+
+`claude-mem-cowork@thedotmack` 是 claude-mem 的**雲端**那一半。它自己的 marketplace 說明寫著：「hooks stream tool use to cmem.ai and inject observations into new sessions and agents」——也就是**會把你的工具使用紀錄送到外部服務 cmem.ai**。上面三步裝的本機 claude-mem 不會，也不需要它。
+
+所以根目錄的 `install.ps1` **不會自己裝它**，而是在整個安裝開始之前問你一次（`-Cowork yes` / `-Cowork no` 可以直接在命令列回答；不回答的話倒數 30 秒後視為不裝）。要手動裝或移除：
+
+`claude-mem-cowork@thedotmack` is the **cloud** half of claude-mem. Its own marketplace
+entry says its hooks "stream tool use to cmem.ai and inject observations into new sessions
+and agents" — it **sends your tool use to an external service**. The local claude-mem
+installed by the three steps above does not, and does not need it.
+
+So the root `install.ps1` **never installs it on its own**. It asks once, before anything
+is installed (`-Cowork yes` / `-Cowork no` answer it from the command line; with no answer
+the countdown runs out after 30 seconds and it is not installed). By hand:
+
+```powershell
+claude plugin install claude-mem-cowork@thedotmack     # 裝 | install
+claude plugin uninstall claude-mem-cowork@thedotmack   # 移除 | remove
 ```
 
 ### ⚠️ 第一行在真正的終端機裡**可能會問你問題** | The first line MAY ask you a question
