@@ -54,16 +54,17 @@
     run in phase 4 with that script's own message and its winget upgrade command.
     That is deliberate: replacing a toolchain you chose is not this script's call.
 
-  - dispatch-guard, UNLESS -All is given. Without -All the three commands are
-    printed at the end instead of run:
-        claude plugin marketplace add Dino9021/dispatch-guard
-        claude plugin install dispatch-guard@dispatch-guard
-        python Tools\deploy.py --user --apply --with-dispatch-guard
-    It is off by default because it reaches past this project: the third command
-    installs a statusline and a background usage watcher for the whole machine.
-    NEVER VERIFIED on a host where `claude` is installed but NOT LOGGED IN - the
-    plugin fetch may need an authenticated CLI. -All existing does not make that
-    verified; it is still on the not-checked list.
+  - NOTHING, as of 2026-10-06. dispatch-guard used to sit behind -All; the owner
+    ruled that it and mattpocock-skills are default installs, and -All was removed
+    with nothing left to gate. $PLUGINS is the list.
+
+    ⚠ THE CAVEAT THAT CAME WITH -All HAS NOT GONE AWAY, only the flag.
+    dispatch-guard reaches past this project: its third command installs a
+    statusline and a background usage watcher for the whole machine. And the
+    plugin fetch is STILL NEVER VERIFIED on a host where `claude` is installed
+    but NOT LOGGED IN - it may need an authenticated CLI. Making it a default
+    does not make that measured; it stays on the not-checked list, and the phase
+    reads the result back rather than assuming.
 
   THE WHOLE FILE MUST PARSE UNDER WINDOWS POWERSHELL 5.1, because a fresh host has
   nothing else and this script installs PowerShell 7 itself before handing over to
@@ -87,12 +88,9 @@ param(
     # the parent forwards this path and stops its own transcript, the child appends,
     # and one run stays one file.
     [string] $LogPath,
-    # Also install dispatch-guard, the one thing this script otherwise leaves out.
-    # TODAY -All MEANS EXACTLY THAT AND NOTHING MORE. If something else is ever
-    # deliberately excluded, state here whether -All covers it: a flag that grows
-    # silently is worse than no flag, because the name keeps promising the same
-    # thing while the behaviour moves underneath it.
-    [switch] $All,
+    # -All is GONE (owner, 2026-10-06). It gated dispatch-guard, which is now a
+    # default install along with mattpocock-skills - see $PLUGINS. Nothing is left
+    # for the flag to mean, and a flag that means nothing is worse than no flag.
     # claude-mem Cowork (claude-mem-cowork@thedotmack) - the CLOUD half of
     # claude-mem. Its own marketplace entry: "hooks stream tool use to cmem.ai".
     # That is an external service, so it is never installed without a decision.
@@ -284,7 +282,18 @@ function Read-CoworkAnswer {
     return 'no'
 }
 
-function Test-DispatchGuardInstalled {
+function Test-PluginKeyMatch {
+    <#
+      Does ONE enabledPlugins entry turn the named plugin on? Pure, so -SelfTest can
+      exercise it - including the lookalike, which is the whole reason it is a
+      function: `dispatch-guard-extra@x` starts with the same nine characters and
+      must NOT count, and an entry set to $false is a key that is switched OFF.
+    #>
+    param([string] $Key, $Value, [string] $PluginName)
+    return ([bool] $Value) -and ($Key -like "$PluginName@*")
+}
+
+function Test-PluginInstalled {
     <#
       Is the plugin ALREADY there? Both halves must be true, because either one
       alone is a half-install that behaves like neither:
@@ -295,7 +304,7 @@ function Test-DispatchGuardInstalled {
       ConvertFrom-Json is used rather than a .NET JSON reader precisely because it
       tolerates the UTF-8 BOM that other tools leave on settings.json.
     #>
-    param([string] $SettingsPath)
+    param([string] $SettingsPath, [string] $PluginName, [string] $CacheRelative)
     if (-not (Test-Path $SettingsPath)) { return $false }
     try { $data = Get-Content $SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { return $false }
@@ -303,10 +312,10 @@ function Test-DispatchGuardInstalled {
     if (-not $enabled) { return $false }
     $keyed = $false
     foreach ($p in $enabled.PSObject.Properties) {
-        if ($p.Name -like 'dispatch-guard@*' -and $p.Value) { $keyed = $true }
+        if (Test-PluginKeyMatch $p.Name $p.Value $PluginName) { $keyed = $true }
     }
     if (-not $keyed) { return $false }
-    $cache = Join-Path $env:USERPROFILE '.claude\plugins\cache\dispatch-guard\dispatch-guard'
+    $cache = Join-Path $env:USERPROFILE (Join-Path '.claude\plugins\cache' $CacheRelative)
     if (-not (Test-Path $cache)) { return $false }
     return @(Get-ChildItem -Path $cache -Directory -ErrorAction SilentlyContinue).Count -gt 0
 }
@@ -388,7 +397,13 @@ $DEPS = @(
        Url = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi';
        File = 'PowerShell-7.6.6-win-x64.msi'; Args = @('/qn', '/norestart', 'ADD_PATH=1') }
 
+    # git resolves its own current release before falling back to the pin: the
+    # filename carries the version, so a pin goes stale on every Git release.
+    # LatestMatch must stay anchored - the same release ships MinGit-*-64-bit.zip,
+    # PortableGit-*-64-bit.7z.exe and Git-*-64-bit.tar.bz2 beside the installer.
     @{ Name = 'git'; Exe = 'git'; Winget = 'Git.Git';
+       LatestApi = 'https://api.github.com/repos/git-for-windows/git/releases/latest';
+       LatestMatch = '^Git-[0-9.]+-64-bit\.exe$';
        Url = 'https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe';
        File = 'Git-2.55.0.5-64-bit.exe'; Args = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-') }
 
@@ -416,6 +431,107 @@ $DEPS = @(
        Args = $null; Script = 'https://claude.ai/install.ps1' }
 )
 
+# ⛔ CLAUDE CODE PLUGINS INSTALLED BY DEFAULT (owner, 2026-10-06 - they used to be
+# optional, behind -All, or not here at all).
+#
+# THREE NAMES, AND THEY ARE NOT THE SAME WORD. `Source` is what `marketplace add`
+# takes (owner/repo); `Market` is the alias that marketplace ends up known by, which
+# is BOTH the half after the @ in a plugin spec AND the first directory under
+# ~/.claude/plugins/cache/; `Plugin` is the plugin itself. For dispatch-guard all
+# three happen to collapse to one word, for mattpocock-skills none of them do -
+# mattpocock/skills -> mattpocock -> mattpocock-skills. Deriving any of them from
+# another would report a present plugin as missing for ever on the second row.
+# Verified 2026-10-06 against the live cache: cache\dispatch-guard\dispatch-guard\
+# and cache\mattpocock\mattpocock-skills\1.2.3\.
+#
+# `Deploy` names a Tools/deploy.py flag that has to run AFTER the plugin is in the
+# cache, because deploy.py looks for the plugin's own install.py there. That is why
+# this phase is last and why its commands cannot be reordered.
+#
+# ⚠ NOT INCLUDED HERE: claude-mem's two plugins. The local one is registered by
+# `npx claude-mem install` in phase 5, not by a plugin command, and the cloud half
+# (Cowork) is the one question this script asks - see -Cowork.
+$PLUGINS = @(
+    @{ Name = 'dispatch-guard'; Source = 'Dino9021/dispatch-guard';
+       Market = 'dispatch-guard'; Plugin = 'dispatch-guard';
+       Deploy = '--with-dispatch-guard';
+       Why = 'the rules this repository runs on, and the hook that enforces them' }
+
+    @{ Name = 'mattpocock-skills'; Source = 'mattpocock/skills';
+       Market = 'mattpocock'; Plugin = 'mattpocock-skills';
+       Deploy = $null;
+       Why = 'skills: TDD, diagnosing bugs, code review, domain modelling' }
+)
+
+function Select-ReleaseAsset {
+    <#
+      Pure, so -SelfTest can exercise it offline: which asset NAMES match. Kept out
+      of Resolve-LatestAsset for exactly that reason - the network half cannot be
+      tested without a network, the choosing half is where the mistakes live.
+    #>
+    param([string[]] $Names, [string] $Pattern)
+    # The leading comma is load-bearing, exactly as in Get-ForwardArgs. Without it
+    # PowerShell unrolls a ONE-element array on return, so the caller gets the
+    # STRING - whose .Count is still 1, and whose [0] is the character 'G'. The
+    # asset lookup would then match nothing, Resolve-LatestAsset would return $null,
+    # and the installer would quietly fall back to the stale pin on every run. The
+    # self-test caught it.
+    return ,@($Names | Where-Object { $_ -match $Pattern })
+}
+
+function Resolve-LatestAsset {
+    <#
+      The CURRENT download URL for a dependency, from the project's own release
+      feed. A pinned URL names one version and that version stops being current -
+      measured 2026-10-06: the pin here was Git 2.55.0.windows.5 while the project
+      had shipped 2.56.0.windows.2 the day before.
+
+      A release feed is used rather than scraping the download PAGE because the
+      feed is the same project's machine-readable output, and an HTML layout change
+      breaks a scraper silently while returning a page that still looks fine.
+
+      ⛔ EXACTLY ONE MATCH, OR NOTHING. Zero means the pattern has rotted; more than
+      one means it has gone loose and the choice between them would be a guess. Both
+      return $null so the caller falls back to the pin, which is at least a version
+      somebody tested. The names this has to reject are real: alongside
+      Git-2.56.0.2-64-bit.exe the same release carries MinGit-...-64-bit.zip,
+      PortableGit-...-64-bit.7z.exe and Git-...-64-bit.tar.bz2.
+    #>
+    param($Dep)
+    if (-not $Dep.LatestApi) { return $null }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        # GitHub refuses a request with no User-Agent.
+        $rel = Invoke-RestMethod -Uri $Dep.LatestApi -UseBasicParsing -TimeoutSec 20 `
+                   -Headers @{ 'User-Agent' = 'dev-workstation-installer' } -ErrorAction Stop
+        $names = @($rel.assets | ForEach-Object { $_.name })
+        $hit = Select-ReleaseAsset -Names $names -Pattern $Dep.LatestMatch
+        if ($hit.Count -ne 1) { return $null }
+        $asset = $rel.assets | Where-Object { $_.name -eq $hit[0] } | Select-Object -First 1
+        return @{ Url = $asset.browser_download_url; File = $asset.name; Tag = $rel.tag_name }
+    }
+    catch { return $null }
+}
+
+function Get-InstallRoute {
+    <#
+      How a dependency WOULD be installed, as one readable line, so -CheckOnly can
+      say it and a real run can print it before it starts. Without this the person
+      watching a bare host cannot tell which of the two mechanisms is in play until
+      something fails.
+
+      $HasWinget is a parameter rather than a probe inside the function so the
+      self-test can exercise BOTH answers on a machine that only has one of them.
+    #>
+    param($Dep, [bool] $HasWinget = [bool] (Get-Command winget -ErrorAction SilentlyContinue))
+
+    if ($Dep.Script) { return "vendor script    $($Dep.Script)" }
+    if ($Dep.Winget -and $HasWinget) { return "winget           $($Dep.Winget)" }
+    if ($Dep.LatestApi) { return "direct download  current release from $($Dep.LatestApi) (pinned fallback: $($Dep.File))" }
+    if ($Dep.Url) { return "direct download  $($Dep.Url)" }
+    return 'NO ROUTE - this dependency cannot be installed on this host'
+}
+
 function Install-Dependency {
     param($Dep)
 
@@ -433,22 +549,53 @@ function Install-Dependency {
         Write-Host "   winget install --id $($Dep.Winget)"
         & winget install --id $Dep.Winget --exact --accept-package-agreements --accept-source-agreements 2>&1 |
             Select-Object -Last 2 | ForEach-Object { Write-Host "     $_" }
-        return
+        # ⛔ READ THE EXIT CODE. This used to `return` unconditionally, so a winget
+        # that was PRESENT but failed - no source, a declined agreement, a package
+        # pulled from the repository - reported nothing and installed nothing, and
+        # the direct download below was never reached. "winget exists" is not
+        # "winget worked". A non-zero code falls through to the download instead.
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Host "   winget exited $LASTEXITCODE - falling back to the direct download" -ForegroundColor Yellow
+        if (-not $Dep.Url) { throw "$($Dep.Name): winget exited $LASTEXITCODE and there is no download URL to fall back to" }
     }
 
-    # No winget on this host - Windows Server ships without App Installer, which is
-    # where the prerequisite gate in graph-servers/install.ps1 has to give up. So:
-    # download the vendor installer and run it silently.
+    # No usable winget - and that is the EXPECTED case, not the exception. Windows
+    # Server ships without App Installer, and on Server 2022 it cannot simply be
+    # added: winget is an MSIX package, Add-AppxPackage is absent, and Get-AppxPackage
+    # answers "Operation is not supported on this platform. (0x80131539)" - measured
+    # 2026-10-06 on Windows Server 2022 Standard 10.0.20348. So installing winget
+    # first is not a fallback that works; downloading the vendor's own installer is.
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $dest = Join-Path $env:TEMP $Dep.File
-    Write-Host "   downloading $($Dep.Url)"
+
+    # The pin is the FALLBACK, not the plan. Ask the project what is current first;
+    # a pin names one version and that version stops being current.
+    $url = $Dep.Url
+    $fileName = $Dep.File
+    if ($Dep.LatestApi) {
+        $latest = Resolve-LatestAsset $Dep
+        if ($latest) {
+            Write-Host "   current release: $($latest.Tag) -> $($latest.File)" -ForegroundColor Green
+            $url = $latest.Url
+            $fileName = $latest.File
+        }
+        else {
+            Write-Host "   could not resolve the current release - using the pinned $($Dep.File)" -ForegroundColor Yellow
+        }
+    }
+    if (-not $url) { throw "$($Dep.Name): no download URL and no release feed to resolve one" }
+
+    $dest = Join-Path $env:TEMP $fileName
+    Write-Host "   downloading $url"
     # A progress bar makes Invoke-WebRequest roughly ten times slower on 5.1.
     $savedProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
-    try { Invoke-WebRequest -Uri $Dep.Url -OutFile $dest -UseBasicParsing -ErrorAction Stop }
+    # $url and $fileName, NOT $Dep.Url / $Dep.File: resolving the current release
+    # and then downloading the pinned one would print the right thing and install
+    # the wrong thing.
+    try { Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop }
     finally { $ProgressPreference = $savedProgress }
 
-    Write-Host "   installing $($Dep.File) (silent)"
+    Write-Host "   installing $fileName (silent)"
     if ($dest.ToLower().EndsWith('.msi')) {
         $all = @('/i', "`"$dest`"") + $Dep.Args
         $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $all -Wait -PassThru
@@ -490,6 +637,34 @@ function Invoke-SelfTest {
     $plain = Get-ForwardArgs @{ Repo = 'C:\norepo\' }
     Check 'a path without a space is left alone' ($plain[1] -eq 'C:\norepo\')
 
+    # EVERY dependency must be installable on a host with NO winget. That is the
+    # expected case here, not the exception: Windows Server ships without App
+    # Installer, and on Server 2022 winget cannot simply be added - Add-AppxPackage
+    # is absent and Get-AppxPackage answers "Operation is not supported on this
+    # platform" (measured 2026-10-06, 10.0.20348).
+    $noWinget = @($DEPS | Where-Object { (Get-InstallRoute $_ $false) -like 'NO ROUTE*' })
+    Check 'every dependency installs without winget' ($noWinget.Count -eq 0)
+    $gitDep = $DEPS | Where-Object { $_.Name -eq 'git' }
+    Check 'no winget: git routes to a direct download' ((Get-InstallRoute $gitDep $false) -like 'direct download*')
+    Check 'winget present: git routes to winget'       ((Get-InstallRoute $gitDep $true) -like 'winget*')
+    # python deliberately never uses winget - see its comment in $DEPS. If that
+    # ever silently changed, pip would start needing admin.
+    $pyDep = $DEPS | Where-Object { $_.Name -eq 'python' }
+    Check 'python ignores winget even when winget exists' ((Get-InstallRoute $pyDep $true) -like 'direct download*')
+
+    # THE ASSET PICKER, against the real names from the live release of 2026-10-06.
+    # The lookalikes are the point: MinGit and PortableGit also say "64-bit", and a
+    # loose pattern would install an archive instead of an installer.
+    $assets = @('Git-2.56.0.2-64-bit.exe', 'Git-2.56.0.2-64-bit.tar.bz2',
+                'MinGit-2.56.0.2-64-bit.zip', 'MinGit-2.56.0.2-busybox-64-bit.zip',
+                'PortableGit-2.56.0.2-64-bit.7z.exe', 'Git-2.56.0.2-32-bit.exe')
+    $picked = Select-ReleaseAsset -Names $assets -Pattern $gitDep.LatestMatch
+    Check 'asset picker: exactly one match' ($picked.Count -eq 1)
+    Check 'asset picker: it is the 64-bit installer' ($picked[0] -eq 'Git-2.56.0.2-64-bit.exe')
+    # A pattern that matches NOTHING must be visible as zero, not silently accepted.
+    $none = Select-ReleaseAsset -Names $assets -Pattern '^NoSuchAsset-[0-9]+\.exe$'
+    Check 'asset picker: a dead pattern returns zero, not a guess' ($none.Count -eq 0)
+
     # The Cowork answer parser. Y is the ONLY thing that means yes; every key a
     # person presses to dismiss a prompt has to land on no, and anything else has
     # to leave the countdown running rather than be taken as an answer.
@@ -508,6 +683,29 @@ function Invoke-SelfTest {
     # vanishes on the way to the PowerShell 7 child, a string does not.
     $cw = Get-ForwardArgs @{ Cowork = 'no' }
     Check 'cowork: -Cowork no survives the relaunch' (($cw.Count -eq 2) -and ($cw[0] -eq '-Cowork') -and ($cw[1] -eq 'no'))
+
+    # THE PLUGIN TABLE. Three names per row that are NOT the same word, and the
+    # whole phase breaks quietly if any row loses one.
+    foreach ($pl in $PLUGINS) {
+        Check "plugin $($pl.Name): has a source, a market and a plugin name" `
+              ([bool] $pl.Source -and [bool] $pl.Market -and [bool] $pl.Plugin)
+    }
+    $byName = @{}; foreach ($pl in $PLUGINS) { $byName[$pl.Name] = $pl }
+    Check 'plugins: dispatch-guard is a default install' ($byName.ContainsKey('dispatch-guard'))
+    Check 'plugins: mattpocock-skills is a default install' ($byName.ContainsKey('mattpocock-skills'))
+    # The row where all three names differ - if anything ever derives one from
+    # another, this is the row that catches it.
+    Check 'plugins: mattpocock spec is mattpocock-skills@mattpocock' `
+          ("$($byName['mattpocock-skills'].Plugin)@$($byName['mattpocock-skills'].Market)" -eq 'mattpocock-skills@mattpocock')
+    Check 'plugins: only dispatch-guard carries a deploy.py flag' `
+          ((@($PLUGINS | Where-Object { $_.Deploy }).Count -eq 1) -and $byName['dispatch-guard'].Deploy)
+
+    # THE LOOKALIKE. 'dispatch-guard-extra@x' shares the first nine characters, and
+    # a key set to $false is a plugin that is switched OFF, not one that is present.
+    Check 'plugin key: exact plugin at a marketplace matches' (Test-PluginKeyMatch 'dispatch-guard@dispatch-guard' $true 'dispatch-guard')
+    Check 'plugin key: a different marketplace still matches'  (Test-PluginKeyMatch 'dispatch-guard@somewhere' $true 'dispatch-guard')
+    Check 'plugin key: a LONGER plugin name does NOT match'    (-not (Test-PluginKeyMatch 'dispatch-guard-extra@x' $true 'dispatch-guard'))
+    Check 'plugin key: a key set to false does NOT match'      (-not (Test-PluginKeyMatch 'dispatch-guard@dispatch-guard' $false 'dispatch-guard'))
 
     $probe = @(@{ Exe = 'cmd' }, @{ Exe = 'no-such-tool-b7f3a1' })
     $miss = Get-MissingDependency $probe
@@ -659,6 +857,19 @@ if ($CheckOnly) {
     Write-Host "CHECK ONLY - nothing will be installed or written, apart from this log" -ForegroundColor Yellow
 }
 
+# -All was removed on 2026-10-06. ⚠ A script with no [CmdletBinding()] does NOT
+# refuse an unknown named parameter - it drops it into $args and carries on - so a
+# saved command line or a habit would do nothing and say nothing. Measured: passing
+# -All to this script produced no error at all. Say it out loud instead.
+# ([CmdletBinding()] is deliberately NOT added: this repository already has a
+# handover documenting how it breaks the $args path under 5.1.)
+if (@($args | Where-Object { "$_" -match '^-+all$' }).Count -gt 0) {
+    Write-Host ""
+    Write-Host "NOTE: -All no longer exists, and it was ignored." -ForegroundColor Yellow
+    Write-Host "      It used to gate dispatch-guard. dispatch-guard and mattpocock-skills" -ForegroundColor Yellow
+    Write-Host "      are now installed by default, so there is nothing left for it to turn on." -ForegroundColor Yellow
+}
+
 # --------------------------------------------------- the plan, and the one question
 # ASKED HERE, BEFORE ANYTHING IS INSTALLED, and never again later in the run. A
 # question raised forty minutes in, behind a third-party installer's output, is a
@@ -675,9 +886,8 @@ if ($Cowork -eq 'ask' -and -not $CheckOnly) {
     Write-Host "   3. place the CLAUDE.md instruction files (Tools\deploy.py)"
     Write-Host "   4. install GitNexus and code-review-graph, their MCP entries and hooks"
     Write-Host "   5. install claude-mem - LOCAL cross-session memory, nothing uploaded"
-    if ($All) {
-        Write-Host "   6. -All: install dispatch-guard (statusline + usage watcher, machine-wide)"
-    }
+    Write-Host "   6. install the Claude Code plugins: $(($PLUGINS | ForEach-Object { $_.Name }) -join ', ')"
+    Write-Host "      (dispatch-guard also adds a statusline and a usage watcher, machine-wide)"
     Write-Host "   Anything already installed is left alone, never replaced."
     Write-Host ""
     Write-Host "One optional extra - and this is the only question this script asks:" -ForegroundColor Cyan
@@ -776,6 +986,17 @@ if ($Cowork -ne 'ask' -and -not $script:coworkAsked) {
 Write-Phase "Toolchain"
 if ($SkipDeps) { Write-Host "   -SkipDeps: reporting only, installing nothing" }
 
+# Probed ONCE and stated, because every install route below turns on it and a
+# reader should not have to infer it from which command ran.
+$script:hasWinget = [bool] (Get-Command winget -ErrorAction SilentlyContinue)
+if ($script:hasWinget) { Write-Host "   winget   present" -ForegroundColor Green }
+else {
+    Write-Host "   winget   NOT present - installers come from a direct download" -ForegroundColor Yellow
+    Write-Host "            (normal on Windows Server: it ships without App Installer,"
+    Write-Host "             and on Server 2022 winget cannot be added - Add-AppxPackage"
+    Write-Host "             is absent. Nothing here needs it.)"
+}
+
 foreach ($d in $DEPS) {
     $found = Get-Command $d.Exe -ErrorAction SilentlyContinue
     if ($found) { Write-Host ("   {0,-8} present  {1}" -f $d.Name, $found.Source) -ForegroundColor Green }
@@ -792,6 +1013,13 @@ if ($missing.Count -gt 0) {
     if ($CheckOnly) {
         Write-Host ""
         Write-Host "   would install: $names" -ForegroundColor Yellow
+        # WHICH ROUTE, not just which tool. On a host with no winget the answer is
+        # "it downloads these" - and that is the thing somebody staring at a bare
+        # server needs to know before they commit to a real run.
+        Write-Host ("   winget on this host: {0}" -f $(if ($script:hasWinget) { 'yes' } else { 'NO - everything below comes from a direct download' })) -ForegroundColor Yellow
+        foreach ($d in $missing) {
+            Write-Host ("     {0,-8} {1}" -f $d.Name, (Get-InstallRoute $d))
+        }
         # STOP HERE, and this is not tidiness. A real run installs these in THIS
         # phase, BEFORE the prerequisite gate in preflight A ever sees them - so
         # carrying on would run that gate against a machine the real run would
@@ -820,6 +1048,7 @@ if ($missing.Count -gt 0) {
         foreach ($d in $missing) {
             Write-Host ""
             Write-Host "   installing $($d.Name)" -ForegroundColor Cyan
+            Write-Host "     via $(Get-InstallRoute $d)"
             Install-Dependency $d
         }
         Update-PathFromRegistry
@@ -960,19 +1189,20 @@ if ($CheckOnly) {
     }
     Write-Host "   The first of those MAY ask a question in a real terminal (cloud tier vs"
     Write-Host "   local); the real run explains it before starting. Answer: local."
-    if ($All) {
-        # -All + -CheckOnly must REPORT and install nothing. Stated as its own
-        # branch because the pair is exactly the shape that bit install.ps1's
-        # -PatchOnly -CheckOnly (which wrote while claiming to check).
-        Write-Host ""
-        Write-Host "   -All would then install dispatch-guard:" -ForegroundColor Yellow
-        if (Test-DispatchGuardInstalled $script:settingsPath) {
-            Write-Host "     already installed - it would be left alone" -ForegroundColor Green
+    # -CheckOnly must REPORT and install nothing. Stated as its own block because
+    # that pair is exactly the shape that bit install.ps1's -PatchOnly -CheckOnly
+    # (which wrote while claiming to check).
+    Write-Host ""
+    Write-Host "   it would then install these Claude Code plugins:" -ForegroundColor Yellow
+    foreach ($pl in $PLUGINS) {
+        if (Test-PluginInstalled $script:settingsPath $pl.Plugin (Join-Path $pl.Market $pl.Plugin)) {
+            Write-Host "     $($pl.Name): already installed - it would be left alone" -ForegroundColor Green
         }
         else {
-            Write-Host "     claude plugin marketplace add Dino9021/dispatch-guard"
-            Write-Host "     claude plugin install dispatch-guard@dispatch-guard"
-            Write-Host "     python Tools\deploy.py --user --apply --with-dispatch-guard"
+            Write-Host "     $($pl.Name) - $($pl.Why)"
+            Write-Host "       claude plugin marketplace add $($pl.Source)"
+            Write-Host "       claude plugin install $($pl.Plugin)@$($pl.Market)"
+            if ($pl.Deploy) { Write-Host "       python Tools\deploy.py --user --apply $($pl.Deploy)" }
         }
     }
     Write-Host "CHECK ONLY: nothing was installed or written apart from the log below." -ForegroundColor Yellow
@@ -1026,9 +1256,10 @@ else {
 
 # --------------------------------------------------------- phase 5: claude-mem
 # DEFAULT ON, exactly like the two graph servers, because it is the same kind of
-# thing: tooling that assists the Claude Code agent while you develop. It is not
-# behind -All - -All is for dispatch-guard, which enforces RULES and is a
-# different decision.
+# thing: tooling that assists the Claude Code agent while you develop. (It used to
+# say "not behind -All, which is for dispatch-guard" - as of 2026-10-06 there is no
+# -All and dispatch-guard is a default too. Only the cloud half, Cowork, is asked
+# about.)
 #
 # Four commands, and the fourth is the one people leave out. See
 # claude-mem/README.md for the measurements behind each line.
@@ -1126,46 +1357,49 @@ else {
     Write-Host "   Diagnose with: npx claude-mem doctor" -ForegroundColor Red
 }
 
-# ------------------------------------------------- phase 6: dispatch-guard (-All)
-# Last on purpose. The third command needs the plugin already in the cache for
-# Tools/deploy.py to find its install.py, so the order is marketplace -> plugin ->
-# deploy.py and cannot be rearranged.
+# ------------------------------------------------------- phase 6: Claude Code plugins
+# Last on purpose. deploy.py's --with-dispatch-guard needs the plugin ALREADY in the
+# cache to find its install.py, so marketplace -> plugin -> deploy.py cannot be
+# reordered, and nothing earlier may depend on a plugin being there.
 
-$guardDone = $false
-if ($All) {
-    Write-Phase "dispatch-guard (-All)"
-    if (Test-DispatchGuardInstalled $script:settingsPath) {
-        # Same discipline the graph-servers steps are being given: check before
-        # you reinstall. A re-run should cost nothing.
+Write-Phase "Claude Code plugins"
+$pluginFailed = @()
+foreach ($pl in $PLUGINS) {
+    Write-Host ""
+    Write-Host "   $($pl.Name) - $($pl.Why)" -ForegroundColor Cyan
+    $cacheRel = Join-Path $pl.Market $pl.Plugin
+    if (Test-PluginInstalled $script:settingsPath $pl.Plugin $cacheRel) {
+        # Check before you reinstall, the same discipline every other phase got.
+        # A re-run should cost nothing.
         Write-Host "   already installed (plugin key + cache present) - left alone" -ForegroundColor Green
-        $guardDone = $true
+        continue
+    }
+    & claude plugin marketplace add $pl.Source 2>&1 |
+        ForEach-Object { Write-Host "     $_" }
+    & claude plugin install "$($pl.Plugin)@$($pl.Market)" 2>&1 |
+        ForEach-Object { Write-Host "     $_" }
+    if ($pl.Deploy) {
+        # Adds the settings keys and relays the plugin's own install.py --all
+        # (for dispatch-guard: statusline + usage watcher). Same script as phase 3.
+        & python $deploy --user --apply $pl.Deploy 2>&1 |
+            ForEach-Object { Write-Host "     $_" }
+    }
+
+    # Read the result back rather than announcing what was attempted - a success
+    # marker printed unconditionally is evidence of nothing.
+    if (Test-PluginInstalled $script:settingsPath $pl.Plugin $cacheRel) {
+        Write-Host "   verified: plugin key and cache are both present now" -ForegroundColor Green
     }
     else {
-        & claude plugin marketplace add Dino9021/dispatch-guard 2>&1 |
-            ForEach-Object { Write-Host "   $_" }
-        & claude plugin install dispatch-guard@dispatch-guard 2>&1 |
-            ForEach-Object { Write-Host "   $_" }
-        # Adds the two settings keys and relays the plugin's own install.py --all
-        # (statusline + usage watcher). It is the same script phase 3 used.
-        & python $deploy --user --apply --with-dispatch-guard 2>&1 |
-            ForEach-Object { Write-Host "   $_" }
-
-        # Read the result back rather than announcing what was attempted - a
-        # success marker printed unconditionally is evidence of nothing.
-        if (Test-DispatchGuardInstalled $script:settingsPath) {
-            Write-Host "   verified: plugin key and cache are both present now" -ForegroundColor Green
-            $guardDone = $true
-        }
-        else {
-            Write-Host "   NOT installed - the key or the cache is still missing." -ForegroundColor Red
-            Write-Host '   If the claude CLI is not logged in on this host, that is the first' -ForegroundColor Red
-            Write-Host '   thing to check: the plugin fetch may need an authenticated CLI.' -ForegroundColor Red
-        }
+        $pluginFailed += $pl.Name
+        Write-Host "   NOT installed - the key or the cache is still missing." -ForegroundColor Red
+        Write-Host '   If the claude CLI is not logged in on this host, that is the first' -ForegroundColor Red
+        Write-Host '   thing to check: the plugin fetch may need an authenticated CLI.' -ForegroundColor Red
     }
-    Write-Host ""
-    Write-Host "   The plugin loads at the NEXT session start (or /reload-plugins)," -ForegroundColor Yellow
-    Write-Host "   so no script can confirm from here that its rules are live." -ForegroundColor Yellow
 }
+Write-Host ""
+Write-Host "   Plugins load at the NEXT session start (or /reload-plugins), so no" -ForegroundColor Yellow
+Write-Host "   script can confirm from here that their rules and skills are live." -ForegroundColor Yellow
 
 Write-Host ""
 Write-Host "===== what only you can do =====" -ForegroundColor Cyan
@@ -1174,15 +1408,20 @@ Write-Host "1. Fill the project template. $Repo\CLAUDE.md has 27 FILL slots, one
 Write-Host "   which names a rule-history file you must create EMPTY yourself."
 Write-Host "   Delete every section this project has nothing to put in - expected, not a loss."
 Write-Host ""
-if ($guardDone) {
-    Write-Host "2. dispatch-guard is installed (-All did it). It loads at the next session"
-    Write-Host "   start - run /reload-plugins, or just start a new session."
+if ($pluginFailed.Count -eq 0) {
+    Write-Host "2. The plugins are installed. They load at the NEXT session start -"
+    Write-Host "   run /reload-plugins, or just start a new session."
 }
 else {
-    Write-Host "2. Install dispatch-guard (not done: pass -All to have this script do it):"
-    Write-Host "     claude plugin marketplace add Dino9021/dispatch-guard"
-    Write-Host "     claude plugin install dispatch-guard@dispatch-guard"
-    Write-Host "     python Tools\deploy.py --user --apply --with-dispatch-guard"
+    # Name WHICH ones, and give the commands for those only. An alert that says how
+    # many and never which is an alert nobody can act on.
+    Write-Host "2. These plugins did NOT install: $($pluginFailed -join ', ')" -ForegroundColor Red
+    Write-Host "   If the claude CLI is not logged in on this host, check that first."
+    foreach ($pl in ($PLUGINS | Where-Object { $pluginFailed -contains $_.Name })) {
+        Write-Host "     claude plugin marketplace add $($pl.Source)"
+        Write-Host "     claude plugin install $($pl.Plugin)@$($pl.Market)"
+        if ($pl.Deploy) { Write-Host "     python Tools\deploy.py --user --apply $($pl.Deploy)" }
+    }
 }
 Write-Host ""
 Write-Host "3. Verify what a session actually LOADS - no script can see this:"

@@ -54,12 +54,13 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 ### 安裝順序
 
 1. **PowerShell 7**——先裝它，然後整支腳本重新在它底下執行
-2. **工具鏈**——`git`、`node`、`python`、`claude`。有 winget 套件的走 winget，沒有的用原廠靜默安裝檔
+2. **工具鏈**——`git`、`node`、`python`、`claude`。**不需要 winget**：有 winget 而且它成功就用它，沒有或失敗就直接下載原廠安裝檔靜默安裝。`git` 還會先向 Git for Windows 的 release feed 問出當前版本，釘住的網址只是最後防線
 3. **指令檔**——`Tools/deploy.py` 放置使用者層級的兩份與專案層級的範本
 4. **圖譜伺服器**——`graph-servers/install.ps1` 裝兩台伺服器、註冊 MCP、掛 refresh hook 與 post-commit hook、建第一次索引、啟動背景監看服務
 5. **claude-mem**——跨 session 記憶，純本機
+6. **Claude Code 外掛**——`dispatch-guard`（本專案運作所依據的規則，以及強制執行它們的 hook）與 `mattpocock-skills`（TDD、除錯、code review、領域建模等 skills）
 
-加上 `-All` 會多裝第六項 `dispatch-guard`。它預設不裝，因為它伸手到這個專案以外：會為整台機器裝一條狀態列和一個背景額度監看工作。不加 `-All` 時，腳本會在最後把那三條指令印出來讓你自己決定。
+⚠ `dispatch-guard` 會伸手到這個專案以外：它會為整台機器裝一條狀態列和一個背景額度監看工作。2026-10-06 起它是預設安裝（原本藏在 `-All` 後面，該參數已取消）。
 
 ### 常用參數
 
@@ -70,7 +71,6 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 | `-Pdg` | 建索引時多建 PDG 層。`explain`（汙染分析）與 `pdg_query` 需要它，但慢很多，而且**必須在第一次執行時就加**：索引那一步無條件執行，事後才想要就得整個再跑一次 |
 | `-SkipDeps` | 不安裝任何缺少的工具，只做設定 |
 | `-LogPath <路徑>` | 改變 log 位置 |
-| `-All` | 連 `dispatch-guard` 一起裝 |
 | `-Cowork yes` / `-Cowork no` | 直接回答「要不要裝 claude-mem Cowork」，腳本就不會問。見下方說明 |
 | `-SelfTest` | 離線自我測試，不碰任何東西，連 log 都不寫 |
 | `-CheckUrls` | 檢查釘住的下載網址是否還活著 |
@@ -114,6 +114,54 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckUrls   # 釘住的�
 ```
 
 `-CheckUrls` 建議每隔幾個月重跑。四個釘住的安裝檔網址是這個 repo 裡**沒人動它也會自己壞掉**的部分，而 404 偏偏只在你站在一台沒有工具鏈的機器前面時才會發現。它每個網址發一個 HEAD 請求，外加一個故意會 404 的對照組，什麼都不下載；網址掛掉**或對照組居然通過**都會回傳非 0——一個分辨不出差異的量測工具不算證據。
+
+## 記憶放在哪裡
+
+`~/` 代表你的使用者目錄（`%USERPROFILE%`，例如 `C:\Users\你的帳號`）；`<專案>` 代表某個專案的根目錄。
+
+### 跟著專案走，而且進 git
+
+| 位置 | 放什麼 |
+|---|---|
+| `<專案>/Memory/notes/` | **專案自己的記憶**：決策筆記 |
+| `<專案>/Memory/tasks/<時間戳-任務名>/` | 每個任務一個資料夾：提示詞、結果記錄、驗收腳本、量測證據 |
+| `<專案>/CLAUDE.md` | 專案層級的 agent 指令 |
+
+`Memory/` **故意被 git 追蹤**，它是每個 commit 背後的理由。公開快照由 `Tools/publish-public.py` 排除，不是靠 `.gitignore`。
+
+### 跟著專案走，但不進 git
+
+| 位置 | 放什麼 |
+|---|---|
+| `<專案>/CLAUDE.local.md` | 個人的 harness 設定（圖譜伺服器用法），被 `.gitignore` |
+| `<專案>/.gitnexus/` | GitNexus 的索引與圖譜資料庫 |
+| `<專案>/.code-review-graph/` | code-review-graph 的圖譜資料庫與 embeddings |
+
+### 只在這台機器上
+
+| 位置 | 放什麼 |
+|---|---|
+| `~/.claude/CLAUDE.md` | 全機器通用規則，每個專案每個 session 都載入 |
+| `~/.claude/docs/VERIFICATION-LESSONS.md` | 通用規則指向的驗證守則 |
+| `~/.claude/settings.json` | hook、MCP 伺服器、啟用的外掛 |
+| `~/.claude/projects/<專案路徑轉成的名字>/<session-id>.jsonl` | **逐字稿**：每個 session 一個檔，完整對話與工具呼叫 |
+| `~/.claude/projects/<同上>/<session-id>/tool-results/` | 大到塞不進逐字稿的工具輸出 |
+| `~/.claude/file-history/<session-id>/` | Claude Code 改過的檔案快照，用來還原 |
+| `~/.claude/shell-snapshots/`、`~/.claude/sessions/`、`~/.claude/state/` | Claude Code 自己的 session 狀態，本專案不碰 |
+| `~/.claude-mem/claude-mem.db` | **claude-mem 的記憶**：跨 session 的觀察與摘要（SQLite） |
+| `~/.claude-mem/chroma/` | 同一批記憶的向量索引，給語意搜尋用 |
+| `~/.claude-mem/corpora/`、`~/.claude-mem/logs/` | 知識庫與 worker 的 log |
+| `~/.code-review-graph/` | watch daemon 的狀態與被監看的專案清單（`watch.toml`、`registry.json`） |
+
+⚠ **`<專案>/Memory/` 和 `~/.claude-mem/` 是兩回事。** 前者是人寫的、跟著 repo 走；後者是 claude-mem 自動記錄的，只在這台機器上。`claude-mem/claude-md-snippet.zh-TW.md` 裡有一條規則就是為了避免 agent 把兩者搞混。
+
+⚠ **這些會長大，而且長得比想像快。** 本機 2026-10-06 量到：`~/.claude-mem` 2.0 GB（其中 `claude-mem.db` 連 WAL 745 MB）、`~/.claude/projects` 1.9 GB 的逐字稿、`~/.code-review-graph` 31.5 GB（`graph.db` 25.2 GB ＋ WAL 6.3 GB）。換機器之前值得先看一眼。
+
+### 換機器的時候要帶什麼
+
+重裝一次 `install.ps1` 就會回來的：`~/.claude/CLAUDE.md`、`~/.claude/docs/`、`<專案>/.gitnexus/`、`<專案>/.code-review-graph/`、`~/.code-review-graph/`——它們都是從別的東西重建出來的。
+
+**重建不回來的只有兩個**：`<專案>/Memory/`（在 git 裡，clone 就有）和 `~/.claude-mem/`（不在任何 repo 裡，要自己複製）。逐字稿 `~/.claude/projects/` 也不在 repo 裡，但 claude-mem 已經把它濃縮過了。
 
 ## 慣例
 
@@ -191,18 +239,23 @@ to it.
 ### The order it installs in
 
 1. **PowerShell 7** — first, then the whole script relaunches under it
-2. **Toolchain** — `git`, `node`, `python`, `claude`: winget where there is a package, the
-   vendor's own silent installer where there is not
+2. **Toolchain** — `git`, `node`, `python`, `claude`. **winget is not required.** It is
+   used when it is present *and succeeds*; otherwise the vendor's own installer is
+   downloaded and run silently. `git` asks the Git for Windows release feed for the
+   current version first, so the pinned URL is only the last resort
 3. **Instruction files** — `Tools/deploy.py` places the user-scope pair and the project
    template
 4. **Graph servers** — `graph-servers/install.ps1` installs both servers, registers the MCP
    entries, wires the refresh and post-commit hooks, builds the first index and starts the
    watch daemon
 5. **claude-mem** — cross-session memory, local only
+6. **Claude Code plugins** — `dispatch-guard` (the rules this repository runs on and the
+   hook that enforces them) and `mattpocock-skills` (skills: TDD, diagnosing bugs, code
+   review, domain modelling)
 
-`-All` adds a sixth: `dispatch-guard`. It is off by default because it reaches past this
-project — it installs a statusline and a background usage watcher for the whole machine.
-Without `-All` the script prints its three commands at the end instead of running them.
+⚠ `dispatch-guard` reaches past this project — it installs a statusline and a background
+usage watcher for the whole machine. It became a default on 2026-10-06; it used to sit
+behind `-All`, and that flag is gone. Passing it does nothing and the script says so.
 
 ### The flags you will actually use
 
@@ -213,7 +266,6 @@ Without `-All` the script prints its three commands at the end instead of runnin
 | `-Pdg` | Also build the PDG layers. `explain` (taint) and `pdg_query` need them, they are much slower, and it has to be on the **first** run: the index step runs unconditionally, so asking later means paying for the whole pass again |
 | `-SkipDeps` | Install no missing tools; configure only |
 | `-LogPath <path>` | Move the transcript |
-| `-All` | Also install `dispatch-guard` |
 | `-Cowork yes` / `-Cowork no` | Answers the one question up front, so the script does not ask. See below |
 | `-SelfTest` | Offline self-test. Touches nothing, not even the log |
 | `-CheckUrls` | Are the pinned download URLs still alive? |
@@ -288,6 +340,67 @@ part of this repository that decays without anyone touching it, and a 404 only s
 when you are standing in front of a machine with no toolchain. It sends one HEAD request
 per URL plus a deliberate 404 control, downloads nothing, and exits non-zero if a URL died
 **or if the control passed** — a probe that cannot discriminate is not evidence.
+
+## Where the memory lives
+
+`~/` is your user directory (`%USERPROFILE%`, e.g. `C:\Users\you`); `<project>` is a
+project's root.
+
+### Travels with the project, and is in git
+
+| Location | What |
+|---|---|
+| `<project>/Memory/notes/` | **the project's own memory**: decision notes |
+| `<project>/Memory/tasks/<stamp-task-name>/` | one folder per task: prompts, result records, acceptance harnesses, captured evidence |
+| `<project>/CLAUDE.md` | project-scope agent instructions |
+
+`Memory/` is **tracked on purpose** — it is the reasoning behind every commit. The public
+snapshot excludes it through `Tools/publish-public.py`, by rule, not through `.gitignore`.
+
+### Travels with the project, but is not in git
+
+| Location | What |
+|---|---|
+| `<project>/CLAUDE.local.md` | personal harness config (how to use the graph servers); git-ignored |
+| `<project>/.gitnexus/` | GitNexus's index and graph database |
+| `<project>/.code-review-graph/` | code-review-graph's graph database and embeddings |
+
+### This machine only
+
+| Location | What |
+|---|---|
+| `~/.claude/CLAUDE.md` | universal rules, loaded in every session of every project |
+| `~/.claude/docs/VERIFICATION-LESSONS.md` | the verification rules those universal rules point at |
+| `~/.claude/settings.json` | hooks, MCP servers, enabled plugins |
+| `~/.claude/projects/<project path as a name>/<session-id>.jsonl` | **the transcripts**: one file per session, the whole conversation and every tool call |
+| `~/.claude/projects/<same>/<session-id>/tool-results/` | tool output too large to sit in the transcript |
+| `~/.claude/file-history/<session-id>/` | snapshots of files Claude Code edited, for undo |
+| `~/.claude/shell-snapshots/`, `~/.claude/sessions/`, `~/.claude/state/` | Claude Code's own session state; nothing here touches it |
+| `~/.claude-mem/claude-mem.db` | **claude-mem's memory**: cross-session observations and summaries (SQLite) |
+| `~/.claude-mem/chroma/` | the vector index over the same memory, for semantic search |
+| `~/.claude-mem/corpora/`, `~/.claude-mem/logs/` | knowledge corpora and the worker's log |
+| `~/.code-review-graph/` | the watch daemon's state and the list of watched projects (`watch.toml`, `registry.json`) |
+
+⚠ **`<project>/Memory/` and `~/.claude-mem/` are not the same thing.** The first is written
+by people and travels with the repository; the second is recorded automatically by
+claude-mem and never leaves this machine. `claude-mem/claude-md-snippet.md` carries a rule
+whose only job is to stop an agent confusing them.
+
+⚠ **These grow, faster than you would guess.** Measured on one machine, 2026-10-06:
+`~/.claude-mem` 2.0 GB (of which `claude-mem.db` with its WAL is 745 MB), `~/.claude/projects`
+1.9 GB of transcripts, `~/.code-review-graph` 31.5 GB (`graph.db` 25.2 GB plus a 6.3 GB WAL).
+Worth a look before moving to a new machine.
+
+### What to carry to a new machine
+
+Re-running `install.ps1` brings these back, because each is rebuilt from something else:
+`~/.claude/CLAUDE.md`, `~/.claude/docs/`, `<project>/.gitnexus/`,
+`<project>/.code-review-graph/`, `~/.code-review-graph/`.
+
+**Only two cannot be rebuilt**: `<project>/Memory/` (it is in git, so a clone has it) and
+`~/.claude-mem/` (it is in no repository — copy it yourself). The transcripts under
+`~/.claude/projects/` are not in a repository either, but claude-mem has already distilled
+them.
 
 ## Conventions
 
