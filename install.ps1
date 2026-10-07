@@ -618,6 +618,32 @@ $DEPS = @(
        File = 'python-3.13.15-amd64.exe';
        Args = @('/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_pip=1') }
 
+    # uv, the Astral Python package runner. It is NOT here for its own sake: phase 5's
+    # claude-mem launches the Chroma vector store through it -
+    #     uvx --python 3.13 --with onnxruntime>=1.20 --with protobuf<7
+    #         --with chromadb==1.5.9 --from chroma-mcp==0.2.6 chroma-mcp
+    #         --client-type persistent --data-dir <home>\.claude-mem\chroma
+    # - and without uvx claude-mem comes up DEGRADED rather than broken. Its own log
+    # names it exactly: "uvx executable not found during worker dependency preflight"
+    # then {"dependency":"uvx","kind":"vector_search_unavailable"}. Observations and
+    # keyword search keep working; SEMANTIC search does not.
+    #
+    # ⛔ IT IS HERE BECAUSE claude-mem's INSTALLER CANNOT BE RELIED ON TO GET IT.
+    # Measured 2026-10-07 on a clean Windows 11: claude-mem tried to install uv
+    # itself, from inside its own nested process chain, and failed with "The
+    # 'Get-ExecutionPolicy' command was found in the module
+    # Microsoft.PowerShell.Security, but the module could not be loaded", then
+    # advised `winget install astral-sh.uv` - on a host whose winget does not work.
+    # The same install command run plainly on the same box succeeded. So the
+    # dependency moves into this table, in an order we control, instead of being
+    # left to a third-party installer in an environment we do not.
+    #
+    # Same vendor-script shape as claude below, and the same PathAdd: its installer
+    # also lands in %USERPROFILE%\.local\bin and also writes nothing to the PATH.
+    @{ Name = 'uv'; Exe = 'uv'; Url = $null; File = $null;
+       Args = $null; Script = 'https://astral.sh/uv/install.ps1';
+       PathAdd = '.local\bin' }
+
     # The claude CLI has no versioned download, so the vendor's own installer script
     # is the documented method. It is fetched and executed - stated here rather than
     # buried, because that is what it does.
@@ -1020,10 +1046,22 @@ function Invoke-SelfTest {
     Check 'path entry: a shorter prefix does NOT count'              (-not (Test-PathEntryPresent $pv 'C:\Users'))
     Check 'path entry: absent is absent'                             (-not (Test-PathEntryPresent $pv 'C:\nowhere'))
     Check 'path entry: an empty PATH holds nothing'                  (-not (Test-PathEntryPresent '' 'C:\one'))
-    # Only the claude row needs this, because only its vendor refuses to do it.
+    # Two rows need this, and both for the same reason: their vendor installer places
+    # a binary in %USERPROFILE%\.local\bin and leaves the PATH to a human.
     $clDep = $DEPS | Where-Object { $_.Name -eq 'claude' }
+    $uvDep = $DEPS | Where-Object { $_.Name -eq 'uv' }
     Check 'claude carries the PathAdd its installer will not set' ($clDep.PathAdd -eq '.local\bin')
-    Check 'no other row needs a PathAdd' (@($DEPS | Where-Object { $_.PathAdd }).Count -eq 1)
+    Check 'uv carries it too, and the same directory'             ($uvDep.PathAdd -eq '.local\bin')
+    Check 'exactly those two rows need a PathAdd' `
+          ((@($DEPS | Where-Object { $_.PathAdd }) | ForEach-Object { $_.Name } | Sort-Object) -join ',' -eq 'claude,uv')
+
+    # uv is installed for claude-mem's sake, so it has to EXIST and come BEFORE the
+    # claude-mem phase. Being in $DEPS at all puts it in phase 2, and phase 5 is where
+    # claude-mem runs - but a row that got deleted would take semantic search with it
+    # silently, so its presence is asserted rather than assumed.
+    Check 'uv is in the table at all'          ([bool] $uvDep)
+    Check 'uv comes from the vendor script'    ($uvDep.Script -like 'https://astral.sh/uv/*')
+    Check 'uv needs no download URL of its own' ($null -eq $uvDep.Url)
 
     # THE DOWNLOADED-SCRIPT BODY. claude.ai serves its installer as
     # application/octet-stream, so Invoke-WebRequest hands back bytes and
