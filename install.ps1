@@ -179,7 +179,9 @@ function Get-InstallExitHint {
         # transaction - it is not a process exit code, so a row here could never fire.
         5    { return 'access denied - the installer could not write somewhere it needed to, commonly because administrator rights are missing' }
         740  { return 'this installer refuses to run without elevation' }
-        1223 { return 'an elevation prompt was cancelled' }
+        # ERROR_CANCELLED is generic - an elevation prompt is the usual source from an
+        # installer, but it is not the only one, so the wording does not assert it.
+        1223 { return 'the operation was cancelled - from an installer this is usually a declined elevation prompt' }
         default { return '' }
     }
 }
@@ -748,6 +750,9 @@ $DEPS = @(
        RegFile = 'bin\TortoiseGitProc.exe';
        Resolver = 'tortoisegit';
        LatestIni = 'https://versioncheck.tortoisegit.org/version.txt';
+       # ⚠ THE DIRECTORY AND THE FILE DISAGREE ON THE VERSION, AND THAT IS UPSTREAM'S DOING,
+       # not a typo here: 2.19.1.0 really is published under the 2.19.0.0 directory. The
+       # obvious "correction" to .../2.19.1.0/... answers 404 - measured. Leave it alone.
        Url = 'https://download.tortoisegit.org/tgit/2.19.0.0/TortoiseGit-2.19.1.0-64bit.msi';
        File = 'TortoiseGit-2.19.1.0-64bit.msi'; Args = @('/qn', '/norestart') }
 
@@ -1553,6 +1558,19 @@ function Invoke-SelfTest {
         Check "gate: $n is NOT administrator-only" ((@($row).Count -eq 1) -and (-not $row.NeedsAdmin))
     }
 
+    # The gate prints $b.Url for every row it is waiting on, so a row that needs an
+    # administrator and has no complete address would print an empty column and leave the
+    # reader with a name and nothing to do about it. The general "has a URL or a script"
+    # case above does NOT cover this: uv and claude satisfy it with a Script and no Url.
+    $adminNoUrl = @($DEPS | Where-Object { $_.NeedsAdmin -and (-not $_.Url) })
+    Check 'gate: every administrator-only row has a complete download URL to print' ($adminNoUrl.Count -eq 0)
+
+    # A duplicated row would be installed twice and, in the gate, NAMED twice. Nothing else
+    # in this file would notice.
+    $depNames = @($DEPS | ForEach-Object { $_.Name })
+    $uniqueNames = @($depNames | Sort-Object -Unique)
+    Check 'every dependency name appears exactly once' ($depNames.Count -eq $uniqueNames.Count)
+
     # ---------------------------------------------- the exit-code hints
     Check 'hint: 1601 says administrator' ((Get-InstallExitHint 1601) -match 'administrator')
     Check 'hint: 5 says administrator' ((Get-InstallExitHint 5) -match 'administrator')
@@ -1757,7 +1775,15 @@ if (-not $SkipDeps) {
     # uses Get-Pwsh7Path, which is stricter in one direction (PowerShell 6 is also called
     # pwsh) and looser in another (PowerShell 7 in Program Files but not on PATH). Both
     # differences are reconciled inside Select-AdminBlocker, where a test can reach them.
-    $gateBlockers = @(Select-AdminBlocker $DEPS $gateMissing ([bool] (Get-Pwsh7Path)) (Test-IsElevated))
+    # ⛔ NAMED, not positional, and that is a guard rather than a style. Two of the four
+    # arguments are row arrays, so positionally they are interchangeable - and swapping
+    # them is not a harmless mix-up: the gate would then test the whole $DEPS table for
+    # NeedsAdmin and stop a standard user on a FULLY INSTALLED machine, naming four tools
+    # that are already there. It survives the self-test, because no offline test can reach
+    # a line that reads the real machine. Naming them removes the mistake instead of
+    # testing for it.
+    $gateBlockers = @(Select-AdminBlocker -Deps $DEPS -Missing $gateMissing `
+                        -Pwsh7Found ([bool] (Get-Pwsh7Path)) -Elevated (Test-IsElevated))
     if ($gateBlockers.Count -gt 0) {
         Write-Host ""
         Write-Host "STOP - this account cannot install everything that is missing." -ForegroundColor Red
@@ -1765,8 +1791,15 @@ if (-not $SkipDeps) {
         Write-Host "   You are running without administrator rights, and these are both MISSING" -ForegroundColor Yellow
         Write-Host "   and installable only by an administrator:" -ForegroundColor Yellow
         Write-Host ""
+        # ⛔ $b.Url, NOT Get-InstallRoute. That helper describes the ROUTE, which for a row
+        # with a Resolver is a release feed and a bare filename - measured, tortoisegit
+        # printed "current release from https://versioncheck.tortoisegit.org/version.txt
+        # (pinned fallback: TortoiseGit-2.19.1.0-64bit.msi)", and an administrator cannot
+        # download anything from that. The pinned Url is a complete address that works. It
+        # may be a version behind what a real run would resolve, which does not matter
+        # here: the point is that the tool ends up present, and the next run checks.
         foreach ($b in $gateBlockers) {
-            Write-Host ("     {0,-14} {1}" -f $b.Name, (Get-InstallRoute $b)) -ForegroundColor Yellow
+            Write-Host ("     {0,-14} {1}" -f $b.Name, $b.Url) -ForegroundColor Yellow
         }
         Write-Host ""
         Write-Host "   Two ways past this, either is fine:" -ForegroundColor Cyan

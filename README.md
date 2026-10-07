@@ -44,23 +44,40 @@ One command turns a bare Windows host into a working Claude Code development env
 它們寫進 `C:\Program Files`、`System32` 或 `HKEY_LOCAL_MACHINE`，而一般使用者帳戶對這三個
 地方都沒有寫入權。
 
-| 項目 | 為什麼一定要管理員 | 下載位址 |
+| 項目 | 為什麼一定要管理員 | 下載來源 |
 |---|---|---|
-| PowerShell 7 | 全機器安裝的 MSI，裝進 `C:\Program Files\PowerShell` | https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi |
-| Node.js | 全機器安裝的 MSI，裝進 `C:\Program Files\nodejs` | https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi |
+| PowerShell 7 | 全機器安裝的 MSI，裝進 `C:\Program Files\PowerShell`。要 `-win-x64.msi` 那一個檔 | https://github.com/PowerShell/PowerShell/releases |
+| Node.js | 全機器安裝的 MSI，裝進 `C:\Program Files\nodejs`。要 `-x64.msi` 那一個檔 | https://nodejs.org/en/download |
 | Microsoft Visual C++ Redistributable 2015–2022（x64） | 系統執行階段，檔案放進 `System32`，並寫 `HKLM` | https://aka.ms/vs/17/release/vc_redist.x64.exe |
 | Microsoft Visual C++ Redistributable 2015–2022（x86） | 同上，放進 `SysWOW64` | https://aka.ms/vs/17/release/vc_redist.x86.exe |
 | TortoiseGit | 它是檔案總管的 shell extension，而 shell extension 就是一筆 `HKLM` 註冊，沒有「只裝給我自己」的版本 | https://download.tortoisegit.org/ |
 
-這五項只需要請管理員裝**一次**。裝完之後，往後所有的安裝與更新，你都可以用自己的一般帳戶
-執行，不必再找任何人。
+⚠ 上表第三欄刻意寫**來源**而不是釘住版本的完整檔案網址。腳本擋下來的時候，會把它這一版真正
+要下載的完整網址逐項印在畫面上——那份才是權威，因為它直接來自腳本裡的 `$DEPS` 表。這裡再抄一
+份釘住版本的網址，只會多出一個會過期而且沒人檢查的副本。
 
-**不需要管理員的項目**（2026-10-07 在全新的 Windows 11 上，用一個純粹的一般使用者帳戶實測）：
+這五項只需要請管理員裝**一次**。裝完之後，這支腳本就不會再擋你，其餘項目都可以用自己的一般
+帳戶安裝。
+
+⚠ 但「裝好了」不等於「會自動更新」。這支腳本只檢查某個工具**在不在**，不會把已經裝好的工具
+升級到新版。所以上表五項日後要升級，仍然需要管理員。
+
+**不需要管理員的項目**，分成兩類寫，因為兩類的證據強度不一樣：
+
+*已經在一般使用者帳戶上實測成功*（2026-10-07，全新的 Windows 11）：
 
 - **Git for Windows**——沒有管理員權限時它會自動改成只裝給目前使用者，裝進
   `~\AppData\Local\Programs\Git`，並且自己把路徑加進使用者的 PATH。實測結束碼 0
 - **VS Code**——本專案用的是使用者版安裝檔，裝進 `~\AppData\Local\Programs`。實測結束碼 0
-- **Python**——以 `InstallAllUsers=0` 安裝，整包都只裝給目前使用者
+
+*設計上就屬於使用者範圍，但還沒有在一般使用者帳戶上從頭跑完一次*：
+
+- **Python**——以 `InstallAllUsers=0` 安裝，整包都只裝給目前使用者。
+  ⚠ 目前唯一一次在一般使用者帳戶上的實測是**失敗的**（結束碼 1601），但那是測試環境的問題
+  而不是權限問題：測試是透過 SSH 進行的，而 SSH 的登入權杖沒有 `INTERACTIVE` 這個群組，
+  Windows Installer 服務的存取權限只開給系統管理員、`INTERACTIVE` 與服務帳戶三者。直接坐在
+  機器前面登入的一般使用者是屬於 `INTERACTIVE` 的，所以預期可以正常安裝。完整的推論與反證
+  過程在 `Memory/tasks/20261007-010000-non-admin-install/RESULT.md` 第 3 節
 - **uv** 與 **claude**——原廠安裝指令碼，裝進 `~\.local\bin`
 - 其後所有階段：`Tools/deploy.py`、圖譜伺服器、claude-mem、Claude Code 外掛
 
@@ -70,14 +87,17 @@ One command turns a bare Windows host into a working Claude Code development env
 
 1. 判斷目前這個行程有沒有系統管理員權限
 2. 檢查上表五項裡，哪些是這台機器上**還缺的**（已經裝好的不算）
-3. 如果一項都不缺，就直接往下跑——一般使用者帳戶可以把整套裝完
+3. 如果一項都不缺，就直接往下跑，不會攔你。（其餘項目在設計上都屬於使用者範圍；但「一般
+   使用者帳戶從頭到尾跑完整套安裝」目前還沒有實際完整跑過一次——見上面 Python 那一條）
 4. 如果有缺，就把缺的那幾項連同下載位址列出來，告訴你兩條路（自己用系統管理員身分重跑，
    或請管理員裝那幾項），然後**停下來**
 
-停下來的時候它什麼都還沒做：沒有下載、沒有安裝、沒有改 PATH、沒有建立任何資料夾。
+停下來的時候它只寫了一樣東西——它自己的執行紀錄，`Debug\install-<時間戳>.log`，而且路徑會
+印在畫面上。沒有下載任何安裝檔、沒有安裝任何東西、沒有改 PATH、沒有建立其他任何資料夾。
+結束碼是 1。
 
 ⚠ 這個檢查只看「缺的」項目。如果 PowerShell 7、Node.js、VC++ 執行階段和 TortoiseGit 都已經
-在這台機器上了，那麼一個完全沒有管理員權限的帳戶執行這支腳本會一路跑完，不會被擋。
+在這台機器上了，那麼一個完全沒有管理員權限的帳戶執行這支腳本，不會被這個檢查擋下來。
 
 ### 第一次安裝
 
@@ -277,26 +297,50 @@ They cannot be installed without an administrator because they write to
 `C:\Program Files`, `System32` or `HKEY_LOCAL_MACHINE`, and a standard user account can
 write to none of those.
 
-| Tool | Why it needs an administrator | Download |
+| Tool | Why it needs an administrator | Where to get it |
 |---|---|---|
-| PowerShell 7 | A per-machine MSI, into `C:\Program Files\PowerShell` | https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi |
-| Node.js | A per-machine MSI, into `C:\Program Files\nodejs` | https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi |
+| PowerShell 7 | A per-machine MSI, into `C:\Program Files\PowerShell`. Take the `-win-x64.msi` | https://github.com/PowerShell/PowerShell/releases |
+| Node.js | A per-machine MSI, into `C:\Program Files\nodejs`. Take the `-x64.msi` | https://nodejs.org/en/download |
 | Microsoft Visual C++ Redistributable 2015–2022 (x64) | A system runtime: its DLLs go in `System32` and it writes `HKLM` | https://aka.ms/vs/17/release/vc_redist.x64.exe |
 | Microsoft Visual C++ Redistributable 2015–2022 (x86) | The same, into `SysWOW64` | https://aka.ms/vs/17/release/vc_redist.x86.exe |
 | TortoiseGit | It is an Explorer shell extension, and a shell extension *is* an `HKLM` registration. There is no install-for-me-only form of it | https://download.tortoisegit.org/ |
 
-An administrator installs those five **once**. After that you run every install and every
-update from your own ordinary account, without asking anyone.
+⚠ That last column names a SOURCE and not a pinned file, deliberately. When the script
+stops it prints the full address it would itself have downloaded, for each tool it is
+waiting on, and that is the authoritative one because it comes straight out of the `$DEPS`
+table. A pinned URL copied in here would be a second copy that rots and that nothing
+checks.
 
-**What does not need an administrator** — measured on a clean Windows 11 on 2026-10-07,
-from a plain standard user account:
+An administrator installs those five **once**. After that this script stops blocking you,
+and the rest installs from your own ordinary account.
+
+⚠ Installed is not kept up to date. This script only ever asks whether a tool **is
+present**; it never upgrades one that is. So upgrading any of those five later still needs
+an administrator.
+
+**What does not need an administrator**, in two groups, because the evidence behind them is
+not equally strong:
+
+*Already measured working from a plain standard user account* (clean Windows 11,
+2026-10-07):
 
 - **Git for Windows** — unelevated, its installer falls back to a per-user install into
   `~\AppData\Local\Programs\Git` and adds that directory to your user PATH itself.
   Measured: exit code 0
 - **VS Code** — this project uses the per-user installer, which lands in
   `~\AppData\Local\Programs`. Measured: exit code 0
-- **Python** — installed with `InstallAllUsers=0`, so the whole package is yours alone
+
+*User-scope by design, but not yet run end to end from a standard user account*:
+
+- **Python** — installed with `InstallAllUsers=0`, so the whole package is yours alone.
+  ⚠ The one measurement from a standard user account **failed**, with exit code 1601 — and
+  that is the test environment rather than the privilege. The test ran over SSH, whose
+  logon token has no `INTERACTIVE` group, and access to the Windows Installer service on
+  that host is granted to administrators, `INTERACTIVE` and service accounts only. A
+  standard user signed in at the machine itself is in `INTERACTIVE` and is therefore
+  expected to install it. The working, including the control and the mutation that rule out
+  the alternatives, is in
+  `Memory/tasks/20261007-010000-non-admin-install/RESULT.md` section 3
 - **uv** and **claude** — vendor install scripts, into `~\.local\bin`
 - And every phase after the toolchain: `Tools/deploy.py`, the graph servers, claude-mem,
   the Claude Code plugins
@@ -308,18 +352,20 @@ It checks once, at the very start, before downloading anything:
 1. Does this process hold administrator rights?
 2. Of the five tools above, which are **missing** on this machine? Ones already installed
    do not count.
-3. Nothing missing — it carries straight on. A standard user can complete the whole
-   install.
+3. Nothing missing — it carries straight on and does not stop you. (Everything after the
+   toolchain is user-scope by design; a standard user account running the whole install
+   from end to end has not yet actually been done once — see the Python entry above.)
 4. Something missing — it lists exactly those, with the addresses above, gives you the two
    ways forward (re-run it yourself as an administrator, or ask an administrator to
    install that list once), and **stops**.
 
-When it stops it has done nothing: nothing downloaded, nothing installed, no PATH changed,
-no directory created.
+When it stops it has written exactly one thing — its own run log,
+`Debug\install-<timestamp>.log`, whose path it prints on screen. Nothing downloaded,
+nothing installed, no PATH changed, no other directory created. It exits 1.
 
 ⚠ The check looks only at what is MISSING. On a machine that already has PowerShell 7,
 Node.js, the VC++ runtimes and TortoiseGit, an account with no administrator rights at all
-runs this script from end to end and is never stopped.
+is not stopped by this check.
 
 ### First install
 
