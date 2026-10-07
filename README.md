@@ -40,6 +40,17 @@ One command turns a bare Windows host into a working Claude Code development env
 
 ### 第一次安裝
 
+**全新主機（什麼都還沒裝、連 `git` 都沒有）**——只下載 `install.ps1` 這一個檔案，直接執行：
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1 -OutFile install.ps1 -UseBasicParsing
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+它發現自己旁邊沒有 repo，就會依序：裝 PowerShell 7 → **先裝 Git for Windows → 再把 repo clone 到它旁邊的 `dev-workstation\`** → 把剩下的工作交給 clone 裡的那份 `install.ps1`。全程自動下載、自動安裝，不必再手動下載 ZIP。重跑時已經 clone 好的資料夾會直接沿用，**不會**幫你 `pull`。
+
+**已經有 `git` 的主機**——照舊 clone 再跑：
+
 ```powershell
 git clone https://github.com/Dino9021/dev-workstation.git
 cd dev-workstation
@@ -47,14 +58,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckOnly   # 只檢查�
 powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安裝
 ```
 
-⚠ **全新主機上，第一行跑不起來**，因為它還沒有 `git`——而裝 `git` 正是這支腳本的工作之一。請先到 GitHub 用 *Code → Download ZIP* 下載壓縮檔，解開後直接跑 `install.ps1`。它會把 `git` 裝好，之後想要完整歷史再重新 clone 一次即可。
-
 用 Windows PowerShell 5.1 直接跑就好。腳本會自己安裝 PowerShell 7，再把工作交棒過去。
 
 ### 安裝順序
 
-1. **PowerShell 7**——先裝它，然後整支腳本重新在它底下執行
-2. **工具鏈**——依序檢查並只補缺的：**VS Code**（使用者版，裝在 `~\AppData\Local`，不需要系統管理員）、`git`、**TortoiseGit**、`node`、`python`、`claude`。**不需要 winget**：有 winget 而且它成功就用它，沒有或失敗就直接下載原廠安裝檔靜默安裝。`git` 與 `TortoiseGit` 都會先向各自專案的來源問出當前版本，釘住的網址只是最後防線
+1. **PowerShell 7**——先裝它，然後整支腳本重新在它底下執行。只下載了 `install.ps1` 單檔時，接著**先裝 Git for Windows、再 clone repo**，然後交棒給 clone 裡的那份
+2. **工具鏈**——依序檢查並只補缺的：`git`、**VS Code**（使用者版，裝在 `~\AppData\Local`，不需要系統管理員）、**Microsoft Visual C++ Redistributable 2015–2022**（x64 與 x86，TortoiseGit 官方 FAQ 列的先決條件，所以排在它前面）、**TortoiseGit**、`node`、`python`、`claude`。**完全不使用 winget**：每一項都是直接下載原廠安裝檔靜默安裝。（winget 在 Windows Server 上根本沒有，而在全新的 Windows 11 上雖然有卻是壞的——2026-10-07 實測，三個工具三次都是 `Failed when opening source(s)`，白試一次才退回下載。）`git` 與 `TortoiseGit` 都會先向各自專案的來源問出當前版本，釘住的網址只是最後防線；VS Code 與 VC++ 用的是原廠「永遠指向最新版」的固定網址
 3. **VS Code 擴充套件**——`anthropic.claude-code`（Claude Code extension），用 VS Code 自己的 `code --install-extension` 安裝
 4. **指令檔**——`Tools/deploy.py` 放置使用者層級的兩份與專案層級的範本
 5. **圖譜伺服器**——`graph-servers/install.ps1` 裝兩台伺服器、註冊 MCP、掛 refresh hook 與 post-commit hook、建第一次索引、啟動背景監看服務
@@ -222,6 +231,22 @@ fails or you want to take over by hand.
 
 ### First install
 
+**A fresh host — nothing installed, not even `git`.** Download `install.ps1` on its own
+and run it:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1 -OutFile install.ps1 -UseBasicParsing
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Finding no repository around itself, it installs PowerShell 7, then **Git for Windows,
+then clones the repository into `dev-workstation\` beside itself**, and hands the rest of
+the run to the clone's own `install.ps1`. Everything is downloaded and installed for you;
+there is no ZIP to fetch by hand. A clone that is already there is reused on a re-run, and
+**not** pulled.
+
+**A host that already has `git`** — clone and run as before:
+
 ```powershell
 git clone https://github.com/Dino9021/dev-workstation.git
 cd dev-workstation
@@ -229,23 +254,25 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckOnly   # report onl
 powershell -ExecutionPolicy Bypass -File .\install.ps1              # do it
 ```
 
-⚠ **On a fresh host that first line cannot run**, because there is no `git` yet — and
-installing `git` is one of the things this script does. Download the repository as a ZIP
-from GitHub (*Code → Download ZIP*), unpack it and run `install.ps1` from there. It
-installs `git`, and you can re-clone properly afterwards if you want the history.
-
 Run it from Windows PowerShell 5.1. The script installs PowerShell 7 itself and hands over
 to it.
 
 ### The order it installs in
 
-1. **PowerShell 7** — first, then the whole script relaunches under it
+1. **PowerShell 7** — first, then the whole script relaunches under it. When
+   `install.ps1` was downloaded on its own, it then **installs Git for Windows, clones the
+   repository**, and hands over to the clone's copy
 2. **Toolchain** — checked first and installed only when missing, in this order:
-   **VS Code** (the per-user install, under `~\AppData\Local`, no administrator needed),
-   `git`, **TortoiseGit**, `node`, `python`, `claude`. **winget is not required.** It is
-   used when it is present *and succeeds*; otherwise the vendor's own installer is
-   downloaded and run silently. `git` and `TortoiseGit` each ask their own project for the
-   current version first, so the pinned URLs are only the last resort
+   `git`, **VS Code** (the per-user install, under `~\AppData\Local`, no administrator
+   needed), the **Microsoft Visual C++ Redistributable 2015–2022** (x64 and x86 — the
+   prerequisite TortoiseGit's own FAQ names, so it comes first), **TortoiseGit**, `node`,
+   `python`, `claude`. **winget is not used at all** — every one of them is downloaded
+   from its vendor and installed silently. (winget is absent on Windows Server, and
+   present-but-broken on a clean Windows 11: measured 2026-10-07, three tools, three
+   identical `Failed when opening source(s)` failures before the download anyway.) `git`
+   and `TortoiseGit` each ask their own project for the current version first, so the
+   pinned URLs are only the last resort; VS Code and the VC++ runtime come from the
+   vendor's permanent always-current links
 3. **VS Code extensions** — `anthropic.claude-code`, installed through VS Code's own
    `code --install-extension`
 4. **Instruction files** — `Tools/deploy.py` places the user-scope pair and the project

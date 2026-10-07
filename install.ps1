@@ -3,9 +3,16 @@
 
   It brings a fresh Windows host to this project's working environment, in order:
 
-    1. toolchain      PowerShell 7, git, node, python, claude - checked, and
-                      installed when ABSENT (winget where there is a package, the
-                      vendor's own silent installer where there is not)
+    0. bootstrap      ONLY when this file was downloaded on its own, with no
+                      repository around it: install Git for Windows, clone the
+                      repository beside this file, and hand the run to the CLONE's
+                      install.ps1. A fresh host has no git, so `git clone` cannot
+                      come first - this is what lets it come second.
+    1. toolchain      PowerShell 7, git, VS Code, the VC++ runtime, TortoiseGit,
+                      node, python, claude - checked, and installed when ABSENT,
+                      always from the vendor's own silent installer. WINGET IS NOT
+                      USED: absent on Windows Server, broken out of the box on a
+                      clean Windows 11 (measured 2026-10-07).
     2. CLAUDE.md      Tools/deploy.py places the user-scope pair and the project
                       template
     3. graph servers  graph-servers/install.ps1 installs GitNexus and
@@ -28,6 +35,10 @@
   Idempotent: safe to re-run. It installs a tool only when the tool is absent.
 
   Usage:
+      # a fresh host, nothing installed - download THIS FILE ALONE and run it:
+      Invoke-WebRequest https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1 -OutFile install.ps1 -UseBasicParsing
+      powershell -ExecutionPolicy Bypass -File .\install.ps1
+
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckOnly
       powershell -ExecutionPolicy Bypass -File .\install.ps1
       powershell -ExecutionPolicy Bypass -File .\install.ps1 -Pdg
@@ -51,7 +62,7 @@
     python >= 3.10 are declared and enforced by graph-servers/install.ps1, which
     also records where each minimum comes from; a second copy here is a second
     thing to forget to update. So a tool that is installed but TOO OLD stops the
-    run in phase 4 with that script's own message and its winget upgrade command.
+    run in phase 4 with that script's own message and its own upgrade command.
     That is deliberate: replacing a toolchain you chose is not this script's call.
 
   - NOTHING, as of 2026-10-06. dispatch-guard used to sit behind -All; the owner
@@ -119,8 +130,46 @@ $script:settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
 function Test-InstallExit {
     # 3010 is the msiexec code for "installed, a reboot is pending". Treating it as
     # a failure aborts a run that actually succeeded.
+    #
+    # 1638 is "another version of this product is already installed". The VC++
+    # redistributable answers it when the machine already has a NEWER build than the
+    # download - which is success for a script that only wants it present. Accepting
+    # it for every row is safe because no row's verdict rests on this code alone: the
+    # re-check after the toolchain phase reads the tool back and stops the run if it
+    # is still missing.
     param([int] $Code)
-    return (($Code -eq 0) -or ($Code -eq 3010))
+    return (($Code -eq 0) -or ($Code -eq 3010) -or ($Code -eq 1638))
+}
+
+function Test-IsClone {
+    # Is $Dir a copy of the repository, or a lone install.ps1? The delegate is the
+    # test, not .git: a ZIP download has no .git and is a perfectly good copy.
+    param([string] $Dir)
+    return (Test-Path -LiteralPath (Join-Path $Dir 'Tools\deploy.py'))
+}
+
+function Test-InstallerPayload {
+    <#
+      Is the downloaded file actually an installer? A DEAD aka.ms LINK DOES NOT 404:
+      measured 2026-10-07, .../vs/17/release/no-such-file.x64.exe answered HTTP 200
+      with a bing.com web page, and Invoke-WebRequest saves that page under the .exe
+      name without complaint. Running it then fails with a message about the file,
+      never about the link.
+
+      The first bytes decide: an .exe starts 'MZ', an .msi is an OLE compound file
+      (D0 CF 11 E0). The .msi test is the stricter one on purpose - an .exe saved
+      under an .msi name would be handed to msiexec.
+    #>
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $head = New-Object byte[] 4
+    $fs = [IO.File]::OpenRead($Path)
+    try { $n = $fs.Read($head, 0, 4) } finally { $fs.Dispose() }
+    if ($Path.ToLower().EndsWith('.msi')) {
+        return (($n -eq 4) -and ($head[0] -eq 0xD0) -and ($head[1] -eq 0xCF) -and
+                ($head[2] -eq 0x11) -and ($head[3] -eq 0xE0))
+    }
+    return (($n -ge 2) -and ($head[0] -eq 0x4D) -and ($head[1] -eq 0x5A))
 }
 
 function Get-ForwardArgs {
@@ -159,17 +208,43 @@ function Test-DependencyPresent {
       by an uninstall satisfies the first on its own, and a one-half probe would
       then report a missing tool as present for ever - the same trap
       Test-PluginInstalled documents for the plugin cache.
+
+      The value is either a DIRECTORY (TortoiseGit: RegFile is relative to it) or a
+      FLAG (the VC++ runtime's Installed = 1: RegFile is an absolute path of its
+      own). Installed = 0 is a key that says "not installed", and reads as absent.
+
+      ⛔ AND FOR ONE ROW, BEING ON PATH IS NOT ENOUGH. A row may name ProbeVersion,
+      a regex the tool's own `--version` output has to match. Windows 11 ships a
+      Microsoft Store App Execution Alias for python that Get-Command resolves and
+      that is not python at all - see the python row for the measurement.
     #>
     param($Dep)
     if ($Dep.RegKey) {
-        $dir = $null
-        try { $dir = (Get-ItemProperty -Path $Dep.RegKey -Name $Dep.RegValue -ErrorAction Stop).$($Dep.RegValue) }
-        catch { return $false }
-        if (-not $dir) { return $false }
-        return (Test-Path -LiteralPath (Join-Path $dir $Dep.RegFile))
+        # Test-Path FIRST, and not merely for tidiness. The per-call -ErrorAction
+        # Stop that used to sit in the try below made a missing key a TERMINATING
+        # error, and Start-Transcript records a terminating error as it is RAISED -
+        # before the catch swallows it. So the verdict was right and the log said
+        # "TerminatingError(Get-ItemProperty)" anyway, twice per run on a host with
+        # no TortoiseGit (measured 2026-10-07 on a clean Windows 11), and six times
+        # now that the two VC++ rows probe keys as well.
+        # ⚠ It was NOT the global preference: line 122 sets 'Continue', not 'Stop'.
+        # Changing that would have looked like a fix and changed nothing here.
+        # Asking whether the key exists first generates no record at all.
+        if (-not (Test-Path -LiteralPath $Dep.RegKey)) { return $false }
+        $val = (Get-ItemProperty -LiteralPath $Dep.RegKey -Name $Dep.RegValue -ErrorAction SilentlyContinue).$($Dep.RegValue)
+        if (-not $val) { return $false }
+        $file = $Dep.RegFile
+        if (-not [IO.Path]::IsPathRooted($file)) { $file = Join-Path $val $file }
+        return (Test-Path -LiteralPath $file)
     }
     if (-not $Dep.Exe) { return $false }
-    return [bool] (Get-Command $Dep.Exe -ErrorAction SilentlyContinue)
+    $cmd = Get-Command $Dep.Exe -ErrorAction SilentlyContinue
+    if (-not $cmd) { return $false }
+    if (-not $Dep.ProbeVersion) { return $true }
+    # Ask the tool what it is. A stub answers with something else, or nothing.
+    $spoken = ''
+    try { $spoken = (& $Dep.Exe --version 2>&1 | Out-String) } catch { return $false }
+    return ($spoken -match $Dep.ProbeVersion)
 }
 
 function Get-MissingDependency {
@@ -416,13 +491,32 @@ function Stop-Run {
 
 # ------------------------------------------------------------- what gets installed
 #
-# Pinned versions, and they WILL rot. Bump the four URLs when a download 404s; the
-# winget rows keep working either way. Every URL here is a vendor download already
-# in use on the host this script was written for.
+# Pinned versions, and they WILL rot. A row with a Resolver asks its project what is
+# current and keeps the pin only as a fallback; the rest are bumped by hand when a
+# download 404s, which -CheckUrls exists to find before a bare host does.
+#
+# EVERY ROW IS A DIRECT VENDOR DOWNLOAD. There is no winget route - see the note in
+# Install-Dependency.
 $DEPS = @(
-    @{ Name = 'pwsh'; Exe = 'pwsh'; Winget = 'Microsoft.PowerShell';
+    @{ Name = 'pwsh'; Exe = 'pwsh';
        Url = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi';
        File = 'PowerShell-7.6.6-win-x64.msi'; Args = @('/qn', '/norestart', 'ADD_PATH=1') }
+
+    # git FIRST after pwsh (owner, 2026-10-07): it is what a lone install.ps1 needs
+    # to clone the repository, and TortoiseGit needs it too. The bootstrap installs
+    # this row before anything else; listing it first keeps the printed order and
+    # the real order the same.
+    #
+    # git resolves its own current release before falling back to the pin: the
+    # filename carries the version, so a pin goes stale on every Git release.
+    # LatestMatch must stay anchored - the same release ships MinGit-*-64-bit.zip,
+    # PortableGit-*-64-bit.7z.exe and Git-*-64-bit.tar.bz2 beside the installer.
+    @{ Name = 'git'; Exe = 'git';
+       LatestApi = 'https://api.github.com/repos/git-for-windows/git/releases/latest';
+       LatestMatch = '^Git-[0-9.]+-64-bit\.exe$';
+       Resolver = 'github';
+       Url = 'https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe';
+       File = 'Git-2.55.0.5-64-bit.exe'; Args = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-') }
 
     # ⭐ NO RESOLVER AND NO PIN TO ROT. This URL is a permanent alias that always
     # serves the CURRENT user installer - measured 2026-10-07, it redirected to
@@ -441,21 +535,45 @@ $DEPS = @(
     #               the toolchain phase then needs IN THE SAME RUN. The user
     #               installer writes that to HKCU, and Update-PathFromRegistry
     #               rebuilds from Machine AND User, so it lands without a re-open.
-    @{ Name = 'vscode'; Exe = 'code'; Winget = 'Microsoft.VisualStudioCode';
+    @{ Name = 'vscode'; Exe = 'code';
        Url = 'https://update.code.visualstudio.com/latest/win32-x64-user/stable';
        File = 'VSCodeUserSetup-x64.exe';
        Args = @('/VERYSILENT', '/NORESTART', '/MERGETASKS=!runcode,addtopath') }
 
-    # git resolves its own current release before falling back to the pin: the
-    # filename carries the version, so a pin goes stale on every Git release.
-    # LatestMatch must stay anchored - the same release ships MinGit-*-64-bit.zip,
-    # PortableGit-*-64-bit.7z.exe and Git-*-64-bit.tar.bz2 beside the installer.
-    @{ Name = 'git'; Exe = 'git'; Winget = 'Git.Git';
-       LatestApi = 'https://api.github.com/repos/git-for-windows/git/releases/latest';
-       LatestMatch = '^Git-[0-9.]+-64-bit\.exe$';
-       Resolver = 'github';
-       Url = 'https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe';
-       File = 'Git-2.55.0.5-64-bit.exe'; Args = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-') }
+    # TortoiseGit's own prerequisite, so these two rows come BEFORE it (owner,
+    # 2026-10-07). Its FAQ, tortoisegit.org/support/faq, read 2026-10-07:
+    # "TortoiseGit requires the latest 'Microsoft Visual C++ Redistributable
+    # 2015-2022'" - x64, and x86 "also needed on x64 for shell context menu in x86
+    # applications". The URLs are the ones that FAQ links.
+    #
+    # aka.ms/vs/17/release is Microsoft's permanent alias for the current build, so
+    # like VS Code there is no pin to rot - measured 2026-10-07, x64 redirected to a
+    # 25.6 MB VC_redist.x64.exe. BUT A DEAD aka.ms LINK DOES NOT 404: it answers 200
+    # with a bing.com page. Install-Dependency therefore checks the downloaded bytes
+    # (Test-InstallerPayload), and -CheckUrls fails a text/html answer.
+    #
+    # The probe is the two-half registry probe, but Installed is a FLAG (1), not a
+    # directory, so RegFile is an absolute path: the DLL the runtime puts in
+    # System32 (x64) or SysWOW64 (x86). Measured 2026-10-07 on this host:
+    # Runtimes\x64 Installed=1 v14.51 beside System32\vcruntime140.dll 14.51, and
+    # WOW6432Node\...\Runtimes\x86 Installed=1 v14.44 beside SysWOW64's 14.44.
+    #
+    # ponytail: presence, not version - a host with an OLD 2015-2019 runtime passes.
+    # If TortoiseGit then fails to start, run the vc_redist by hand: it upgrades in
+    # place. Add a minimum when TortoiseGit names one.
+    #
+    # It answers 1638 when the machine is already NEWER - see Test-InstallExit.
+    @{ Name = 'vcredist-x64'; Exe = $null;
+       RegKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'; RegValue = 'Installed';
+       RegFile = (Join-Path $env:windir 'System32\vcruntime140.dll');
+       Url = 'https://aka.ms/vs/17/release/vc_redist.x64.exe';
+       File = 'vc_redist.x64.exe'; Args = @('/install', '/quiet', '/norestart') }
+
+    @{ Name = 'vcredist-x86'; Exe = $null;
+       RegKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86'; RegValue = 'Installed';
+       RegFile = (Join-Path $env:windir 'SysWOW64\vcruntime140.dll');
+       Url = 'https://aka.ms/vs/17/release/vc_redist.x86.exe';
+       File = 'vc_redist.x86.exe'; Args = @('/install', '/quiet', '/norestart') }
 
     # TortoiseGit puts NOTHING on PATH, so Get-Command can never find it. Its probe
     # is the registry key it writes, and then the executable under the directory
@@ -466,7 +584,7 @@ $DEPS = @(
     # It resolves its own current version from the project's version-check endpoint
     # (see Resolve-TortoiseGitAsset); the pin below is only the fallback. An .msi,
     # so Install-Dependency hands it to msiexec and Args are msiexec's, not Inno's.
-    @{ Name = 'tortoisegit'; Exe = $null; Winget = 'TortoiseGit.TortoiseGit';
+    @{ Name = 'tortoisegit'; Exe = $null;
        RegKey = 'HKLM:\SOFTWARE\TortoiseGit'; RegValue = 'Directory';
        RegFile = 'bin\TortoiseGitProc.exe';
        Resolver = 'tortoisegit';
@@ -474,29 +592,71 @@ $DEPS = @(
        Url = 'https://download.tortoisegit.org/tgit/2.19.0.0/TortoiseGit-2.19.1.0-64bit.msi';
        File = 'TortoiseGit-2.19.1.0-64bit.msi'; Args = @('/qn', '/norestart') }
 
-    # npm has no row: it ships with node, and a row for it would ask winget to
-    # install a package that does not exist.
-    @{ Name = 'node'; Exe = 'node'; Winget = 'OpenJS.NodeJS.LTS';
+    # npm has no row: it ships with node, and there is no separate npm download.
+    @{ Name = 'node'; Exe = 'node';
        Url = 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi';
        File = 'node-v24.21.0-x64.msi'; Args = @('/qn', '/norestart') }
 
-    # python is the ONE tool that deliberately skips winget. winget installs it
-    # machine-wide into Program Files, after which pip install needs admin - and
-    # that is exactly the state Tools/deploy.py refuses to deploy over, because
-    # packages would land where every account on the machine sees them. The vendor
-    # installer takes InstallAllUsers=0, which is also what graph-servers/README.md
-    # section 1 tells a human to do by hand.
-    @{ Name = 'python'; Exe = 'python'; Winget = $null;
+    # InstallAllUsers=0 is the load-bearing argument. A machine-wide Python puts
+    # packages in Program Files, after which pip install needs admin - and that is
+    # exactly the state Tools/deploy.py refuses to deploy over, because packages
+    # would land where every account on the machine sees them. graph-servers/README.md
+    # section 1 tells a human to do the same by hand.
+    #
+    # ⛔ ProbeVersion, and it is not decoration. A CLEAN Windows 11 ships an App
+    # Execution Alias at %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe that
+    # Get-Command resolves happily - so presence alone reported python as installed
+    # on a host that had none. Measured 2026-10-07 on Windows 11 10.0.26200:
+    #     python --version
+    #       Python was not found; run without arguments to install from the
+    #       Microsoft Store, or disable this shortcut from Settings > Manage App
+    #       Execution Aliases.        exit 9009
+    # Asking the tool to say what it is costs one process and cannot be fooled by a
+    # stub, which a path blacklist can.
+    @{ Name = 'python'; Exe = 'python'; ProbeVersion = '^\s*Python\s+\d+\.\d+';
        Url = 'https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe';
        File = 'python-3.13.15-amd64.exe';
        Args = @('/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_pip=1') }
 
-    # The claude CLI has no winget package and no versioned download, so the
-    # vendor's own installer script is the documented method. It is fetched and
-    # executed - stated here rather than buried, because that is what it does.
-    @{ Name = 'claude'; Exe = 'claude'; Winget = $null; Url = $null; File = $null;
-       Args = $null; Script = 'https://claude.ai/install.ps1' }
+    # The claude CLI has no versioned download, so the vendor's own installer script
+    # is the documented method. It is fetched and executed - stated here rather than
+    # buried, because that is what it does.
+    #
+    # ⛔ PathAdd, and without it this row can NEVER be satisfied on a clean host. The
+    # vendor's installer places claude.exe in %USERPROFILE%\.local\bin and then
+    # PRINTS instructions for a human to put that directory on the PATH - measured
+    # 2026-10-07 on a clean Windows 11, `claude install` answering: "Native
+    # installation exists but C:\Users\<user>\.local\bin is not in your PATH. Add it
+    # by opening: System Properties -> Environment Variables -> Edit User PATH ...".
+    # Nothing writes it to the registry, so the re-check after this phase found
+    # claude STILL MISSING however many times the run was repeated, and the script's
+    # own advice to "close this terminal and run again" could not have helped.
+    # Relative to USERPROFILE.
+    @{ Name = 'claude'; Exe = 'claude'; Url = $null; File = $null;
+       Args = $null; Script = 'https://claude.ai/install.ps1';
+       PathAdd = '.local\bin' }
 )
+
+# Where a lone install.ps1 clones the repository from: the public copy the README
+# names. Measured 2026-10-07: `git ls-remote` answered anonymously (exit 0), and a
+# control repository that does not exist answered exit 128.
+$REPO_URL = 'https://github.com/Dino9021/dev-workstation.git'
+
+# Where this script may create directories (owner, 2026-10-07: "腳本有需要建立路徑的
+# 時候，先建立一個 C:\WorkSpace，再在裡面建立需要的路徑"). The bootstrap clone is the
+# only thing that lands here today; anything else this script ever has to create goes
+# under the same root rather than inventing a second one.
+#
+# A hard-coded drive letter is deliberate and it is the owner's choice, not an
+# oversight - the alternative, cloning beside wherever install.ps1 happened to be
+# downloaded, puts a repository in Downloads or on a Desktop and leaves it there.
+#
+# ⭐ A STANDARD USER CAN CREATE IT. Measured 2026-10-07 on Windows 11 10.0.26200:
+# C:\ grants NT AUTHORITY\Authenticated Users the AppendData right, which is
+# "create folders", and a folder created there inherits Authenticated Users:Modify -
+# so the non-administrator install the owner wants to test next can both make this
+# directory and write inside it.
+$WORKSPACE_ROOT = 'C:\WorkSpace'
 
 # ⛔ CLAUDE CODE PLUGINS INSTALLED BY DEFAULT (owner, 2026-10-06 - they used to be
 # optional, behind -All, or not here at all).
@@ -623,17 +783,83 @@ function Get-InstallRoute {
       watching a bare host cannot tell which of the two mechanisms is in play until
       something fails.
 
-      $HasWinget is a parameter rather than a probe inside the function so the
-      self-test can exercise BOTH answers on a machine that only has one of them.
+      There is only one mechanism now - see the winget note in Install-Dependency.
     #>
-    param($Dep, [bool] $HasWinget = [bool] (Get-Command winget -ErrorAction SilentlyContinue))
+    param($Dep)
 
     if ($Dep.Script) { return "vendor script    $($Dep.Script)" }
-    if ($Dep.Winget -and $HasWinget) { return "winget           $($Dep.Winget)" }
     if ($Dep.Resolver -eq 'github') { return "direct download  current release from $($Dep.LatestApi) (pinned fallback: $($Dep.File))" }
     if ($Dep.Resolver -eq 'tortoisegit') { return "direct download  current release from $($Dep.LatestIni) (pinned fallback: $($Dep.File))" }
     if ($Dep.Url) { return "direct download  $($Dep.Url)" }
     return 'NO ROUTE - this dependency cannot be installed on this host'
+}
+
+function Test-PathEntryPresent {
+    <#
+      Is $Directory already one of the entries in $PathValue? Pure, so -SelfTest can
+      exercise it. Compared entry by entry after trimming and dropping a trailing
+      backslash - a substring match would call "C:\tools\bin" present because
+      "C:\tools\bin2" is there, and a raw equality would miss "C:\tools\bin\".
+    #>
+    param([string] $PathValue, [string] $Directory)
+    if (-not $Directory) { return $true }
+    $want = $Directory.TrimEnd('\').ToLowerInvariant()
+    foreach ($e in ($PathValue -split ';')) {
+        if ($e.Trim().TrimEnd('\').ToLowerInvariant() -eq $want) { return $true }
+    }
+    return $false
+}
+
+function Add-UserPathEntry {
+    <#
+      Append one directory to the USER PATH, persistently, and to this process.
+
+      ⛔ THE RAW VALUE, NOT THE EXPANDED ONE. A user PATH routinely holds entries
+      like %USERPROFILE%\bin, and [Environment]::GetEnvironmentVariable('PATH','User')
+      returns them ALREADY EXPANDED. Writing that back would bake one machine's
+      literal paths into the registry for ever, and SetEnvironmentVariable would also
+      rewrite the value as REG_SZ when it was REG_EXPAND_SZ, so the remaining
+      %VAR% entries would stop expanding. Both are silent. So: read through the
+      registry API with DoNotExpandEnvironmentNames and write back the same kind.
+
+      Why this exists: the claude CLI's own installer places the binary and then
+      PRINTS instructions for a human to edit the PATH by hand - measured 2026-10-07,
+      "Native installation exists but C:\Users\<user>\.local\bin is not in your PATH.
+      Add it by opening: System Properties -> Environment Variables ...". An
+      unattended install has nobody to read that, so the run could never finish.
+    #>
+    param([string] $Directory)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $key) { throw "cannot open HKCU:\Environment to add $Directory to PATH" }
+    try {
+        $raw = [string] $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        if ($raw) { $kind = $key.GetValueKind('Path') }
+        if (Test-PathEntryPresent $raw $Directory) {
+            Write-Host "   $Directory is already on the user PATH" -ForegroundColor Green
+            return
+        }
+        $sep = if ($raw -and -not $raw.EndsWith(';')) { ';' } else { '' }
+        $key.SetValue('Path', "$raw$sep$Directory", $kind)
+        Write-Host "   added $Directory to the user PATH ($kind)" -ForegroundColor Yellow
+    }
+    finally { $key.Close() }
+    Update-PathFromRegistry
+}
+
+function ConvertTo-ScriptText {
+    <#
+      A downloaded script body as text, whichever shape the web request handed back.
+      Pure, so -SelfTest can exercise it with no network.
+
+      Invoke-WebRequest returns System.Byte[] when the server does not call the body
+      text - claude.ai serves its installer as application/octet-stream - and a
+      string when it does. Both shapes reach here, and only one of them can be run.
+    #>
+    param($Body)
+    if ($null -eq $Body) { return '' }
+    if ($Body -is [byte[]]) { return [Text.Encoding]::UTF8.GetString($Body) }
+    return [string] $Body
 }
 
 function Install-Dependency {
@@ -644,31 +870,49 @@ function Install-Dependency {
         # 5.1 negotiates SSL3/TLS1.0 by default and the vendor refuses it. A no-op
         # on 7, which already defaults to TLS 1.2 and above.
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $installer = (Invoke-WebRequest -Uri $Dep.Script -UseBasicParsing -ErrorAction Stop).Content
+        $body = (Invoke-WebRequest -Uri $Dep.Script -UseBasicParsing -ErrorAction Stop).Content
+        # ⛔ DECODE THE BYTES. claude.ai serves this script as
+        # Content-Type: application/octet-stream, and Invoke-WebRequest hands back a
+        # System.Byte[] for that - in BOTH editions, measured 2026-10-07, so this was
+        # never an edition difference and never worked at all. Invoke-Expression then
+        # died with "Cannot convert 'System.Byte[]' to the type 'System.String'
+        # required by parameter 'Command'" on the first clean host that reached it.
+        # Nothing caught it earlier because every host this ran on already had the
+        # claude CLI, so the row was skipped.
+        #
+        # UTF8.GetString explicitly, not Invoke-RestMethod, which also returns a
+        # string but picks the encoding by its own rules. The payload is UTF-8 with
+        # no BOM (first bytes 112,97,114 = "par" of "param(") - measured the same day.
+        $installer = ConvertTo-ScriptText $body
+        if (-not ($installer -match '\S')) { throw "$($Dep.Name): $($Dep.Script) returned nothing to run" }
+        # The payload opens with a param() block; Invoke-Expression compiles it as a
+        # script block, so that is fine - proven with a probe rather than assumed.
         Invoke-Expression $installer
         return
     }
 
-    if ($Dep.Winget -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Host "   winget install --id $($Dep.Winget)"
-        & winget install --id $Dep.Winget --exact --accept-package-agreements --accept-source-agreements 2>&1 |
-            Select-Object -Last 2 | ForEach-Object { Write-Host "     $_" }
-        # ⛔ READ THE EXIT CODE. This used to `return` unconditionally, so a winget
-        # that was PRESENT but failed - no source, a declined agreement, a package
-        # pulled from the repository - reported nothing and installed nothing, and
-        # the direct download below was never reached. "winget exists" is not
-        # "winget worked". A non-zero code falls through to the download instead.
-        if ($LASTEXITCODE -eq 0) { return }
-        Write-Host "   winget exited $LASTEXITCODE - falling back to the direct download" -ForegroundColor Yellow
-        if (-not $Dep.Url) { throw "$($Dep.Name): winget exited $LASTEXITCODE and there is no download URL to fall back to" }
-    }
+    # ⛔ WINGET IS NOT USED AT ALL, and that is a decision, not an omission (owner,
+    # 2026-10-07: "請改為都不要用 winget 的方式" / "我會在一些預設沒有 winget 的
+    # client 跑安裝").
+    #
+    # It was tried first and fell back to the download when it failed. Measured on a
+    # CLEAN Windows 11 (10.0.26200) on 2026-10-07: winget IS present there and does
+    # NOT work - its sources are not configured on a fresh image, so three tools in
+    # one run produced three identical failures,
+    #     winget install --id Microsoft.PowerShell
+    #       Failed when opening source(s); try the 'source reset' command ...
+    #     winget exited -1978335157 - falling back to the direct download
+    # before the download that was always going to do the work. Every winget attempt
+    # therefore cost a failure and a delay and bought nothing, and the hosts this
+    # script is aimed at do not have winget at all (Windows Server ships without App
+    # Installer, and on Server 2022 it cannot be added - Add-AppxPackage is absent).
+    #
+    # One route means one thing to test and one thing that can break. The rows keep
+    # no Winget field; adding one back would do nothing.
 
-    # No usable winget - and that is the EXPECTED case, not the exception. Windows
-    # Server ships without App Installer, and on Server 2022 it cannot simply be
-    # added: winget is an MSIX package, Add-AppxPackage is absent, and Get-AppxPackage
-    # answers "Operation is not supported on this platform. (0x80131539)" - measured
-    # 2026-10-06 on Windows Server 2022 Standard 10.0.20348. So installing winget
-    # first is not a fallback that works; downloading the vendor's own installer is.
+    # (Measured 2026-10-06 on Windows Server 2022 Standard 10.0.20348: Add-AppxPackage
+    # is absent and Get-AppxPackage answers "Operation is not supported on this
+    # platform. (0x80131539)", so "install winget first" is not a fallback either.)
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
     # The pin is the FALLBACK, not the plan. Ask the project what is current first;
@@ -705,6 +949,9 @@ function Install-Dependency {
     # the wrong thing.
     try { Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop }
     finally { $ProgressPreference = $savedProgress }
+    if (-not (Test-InstallerPayload $dest)) {
+        throw "$($Dep.Name): $url did not serve an installer (no .exe/.msi header) - a dead link answering with a web page?"
+    }
 
     Write-Host "   installing $fileName (silent)"
     if ($dest.ToLower().EndsWith('.msi')) {
@@ -735,6 +982,7 @@ function Invoke-SelfTest {
     Check 'msiexec 0 is success' (Test-InstallExit 0)
     Check 'msiexec 3010 is success (reboot pending)' (Test-InstallExit 3010)
     Check 'msiexec 1603 is failure' (-not (Test-InstallExit 1603))
+    Check 'vc_redist 1638 is success (a NEWER build is already there)' (Test-InstallExit 1638)
 
     $none = Get-ForwardArgs @{}
     Check 'nothing bound forwards nothing' ($none.Count -eq 0)
@@ -748,20 +996,62 @@ function Invoke-SelfTest {
     $plain = Get-ForwardArgs @{ Repo = 'C:\norepo\' }
     Check 'a path without a space is left alone' ($plain[1] -eq 'C:\norepo\')
 
-    # EVERY dependency must be installable on a host with NO winget. That is the
-    # expected case here, not the exception: Windows Server ships without App
-    # Installer, and on Server 2022 winget cannot simply be added - Add-AppxPackage
-    # is absent and Get-AppxPackage answers "Operation is not supported on this
-    # platform" (measured 2026-10-06, 10.0.20348).
-    $noWinget = @($DEPS | Where-Object { (Get-InstallRoute $_ $false) -like 'NO ROUTE*' })
-    Check 'every dependency installs without winget' ($noWinget.Count -eq 0)
+    # EVERY dependency must be installable with no winget anywhere, because there is
+    # no winget route left at all (owner, 2026-10-07). A row that somehow had no
+    # route would be reported missing for ever and never installed.
+    $noRoute = @($DEPS | Where-Object { (Get-InstallRoute $_) -like 'NO ROUTE*' })
+    Check 'every dependency has an install route' ($noRoute.Count -eq 0)
     $gitDep = $DEPS | Where-Object { $_.Name -eq 'git' }
-    Check 'no winget: git routes to a direct download' ((Get-InstallRoute $gitDep $false) -like 'direct download*')
-    Check 'winget present: git routes to winget'       ((Get-InstallRoute $gitDep $true) -like 'winget*')
-    # python deliberately never uses winget - see its comment in $DEPS. If that
-    # ever silently changed, pip would start needing admin.
-    $pyDep = $DEPS | Where-Object { $_.Name -eq 'python' }
-    Check 'python ignores winget even when winget exists' ((Get-InstallRoute $pyDep $true) -like 'direct download*')
+    $pyDep  = $DEPS | Where-Object { $_.Name -eq 'python' }
+    Check 'git routes to a direct download'    ((Get-InstallRoute $gitDep) -like 'direct download*')
+    Check 'python routes to a direct download' ((Get-InstallRoute $pyDep) -like 'direct download*')
+    # THE LOOKALIKE FOR A ROUTE THAT NO LONGER EXISTS. If anybody puts a Winget
+    # field back on a row, it must still not change where the row goes.
+    Check 'a stray Winget field changes no route' `
+          ((Get-InstallRoute @{ Name = 'x'; Winget = 'Some.Package'; Url = 'https://example.invalid/x.msi'; File = 'x.msi' }) -like 'direct download*')
+    Check 'no row carries a Winget field any more' (@($DEPS | Where-Object { $_.Winget }).Count -eq 0)
+
+    # THE PATH ENTRY TEST. Compared entry by entry, because the two cheap ways are
+    # both wrong: a substring match calls C:\tools\bin present when only
+    # C:\tools\bin2 is there, and raw equality misses a trailing backslash.
+    $pv = 'C:\one;C:\tools\bin2;C:\Users\u\.local\bin\'
+    Check 'path entry: present, trailing backslash and case ignored' (Test-PathEntryPresent $pv 'C:\Users\U\.LOCAL\BIN')
+    Check 'path entry: a LONGER sibling does NOT count'              (-not (Test-PathEntryPresent $pv 'C:\tools\bin'))
+    Check 'path entry: a shorter prefix does NOT count'              (-not (Test-PathEntryPresent $pv 'C:\Users'))
+    Check 'path entry: absent is absent'                             (-not (Test-PathEntryPresent $pv 'C:\nowhere'))
+    Check 'path entry: an empty PATH holds nothing'                  (-not (Test-PathEntryPresent '' 'C:\one'))
+    # Only the claude row needs this, because only its vendor refuses to do it.
+    $clDep = $DEPS | Where-Object { $_.Name -eq 'claude' }
+    Check 'claude carries the PathAdd its installer will not set' ($clDep.PathAdd -eq '.local\bin')
+    Check 'no other row needs a PathAdd' (@($DEPS | Where-Object { $_.PathAdd }).Count -eq 1)
+
+    # THE DOWNLOADED-SCRIPT BODY. claude.ai serves its installer as
+    # application/octet-stream, so Invoke-WebRequest hands back bytes and
+    # Invoke-Expression cannot run them. Measured 2026-10-07: the first clean host to
+    # reach that row died with "Cannot convert 'System.Byte[]' to the type
+    # 'System.String'". Every earlier host already had the claude CLI and skipped it.
+    $asBytes = [Text.Encoding]::UTF8.GetBytes("param(`$X)`n'hi'")
+    Check 'script body: bytes decode to the same text' ((ConvertTo-ScriptText $asBytes) -eq "param(`$X)`n'hi'")
+    Check 'script body: a string passes through'       ((ConvertTo-ScriptText "param()") -eq 'param()')
+    Check 'script body: null becomes empty, not a crash' ((ConvertTo-ScriptText $null) -eq '')
+    # Non-ASCII has to survive, or a vendor script with a comment in any other
+    # language would be mangled into something that may still parse.
+    $cjk = [Text.Encoding]::UTF8.GetBytes("# 安裝`n'ok'")
+    Check 'script body: non-ASCII survives the decode' ((ConvertTo-ScriptText $cjk) -eq "# 安裝`n'ok'")
+    # THE LOOKALIKE: decoding bytes as ASCII instead would silently corrupt that.
+    Check 'script body: ASCII decode WOULD have corrupted it' `
+          ([Text.Encoding]::ASCII.GetString($cjk) -ne "# 安裝`n'ok'")
+
+    # THE MICROSOFT STORE STUB. A clean Windows 11 answers Get-Command python with
+    # an App Execution Alias that is not python - so one row asks the tool to say
+    # what it is, and the regex has to accept a real answer and reject the stub's.
+    Check 'python is the one row with a version probe' `
+          ((@($DEPS | Where-Object { $_.ProbeVersion }).Count -eq 1) -and [bool] $pyDep.ProbeVersion)
+    Check 'version probe accepts real python output'  ('Python 3.13.15'   -match $pyDep.ProbeVersion)
+    Check 'version probe accepts a leading newline'   ("`nPython 3.12.1`n" -match $pyDep.ProbeVersion)
+    Check 'version probe REJECTS the Store stub' `
+          (-not ('Python was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Manage App Execution Aliases.' -match $pyDep.ProbeVersion))
+    Check 'version probe REJECTS empty output' (-not ('' -match $pyDep.ProbeVersion))
 
     # THE ASSET PICKER, against the real names from the live release of 2026-10-06.
     # The lookalikes are the point: MinGit and PortableGit also say "64-bit", and a
@@ -827,6 +1117,72 @@ function Invoke-SelfTest {
           (-not (Test-DependencyPresent @{ RegKey = $tgitDep.RegKey; RegValue = $tgitDep.RegValue; RegFile = 'bin\no-such-file-x9.exe' }))
     Remove-Item $fakeRoot -Recurse -Force -ErrorAction SilentlyContinue
 
+    # THE ORDER (owner, 2026-10-07): git before anything that needs it, and the VC++
+    # runtime before TortoiseGit. Read off the table, because the toolchain phase
+    # installs in table order.
+    $order = @($DEPS | ForEach-Object { $_.Name })
+    Check 'order: git is the first row after pwsh' (($order[0] -eq 'pwsh') -and ($order[1] -eq 'git'))
+    Check 'order: git comes before tortoisegit' ($order.IndexOf('git') -lt $order.IndexOf('tortoisegit'))
+    Check 'order: VC++ x64 comes before tortoisegit' (($order.IndexOf('vcredist-x64') -ge 0) -and ($order.IndexOf('vcredist-x64') -lt $order.IndexOf('tortoisegit')))
+    Check 'order: VC++ x86 comes before tortoisegit' (($order.IndexOf('vcredist-x86') -ge 0) -and ($order.IndexOf('vcredist-x86') -lt $order.IndexOf('tortoisegit')))
+
+    foreach ($vc in @($DEPS | Where-Object { $_.Name -like 'vcredist-*' })) {
+        Check "$($vc.Name): the vc_redist silent flags" (($vc.Args -join ' ') -eq '/install /quiet /norestart')
+        Check "$($vc.Name): installs as an .exe, not through msiexec" ($vc.File -like '*.exe')
+        Check "$($vc.Name): probes a registry FLAG plus an absolute DLL path" `
+              ((-not $vc.Exe) -and ($vc.RegValue -eq 'Installed') -and [IO.Path]::IsPathRooted($vc.RegFile))
+    }
+
+    # THE FLAG-SHAPED REGISTRY PROBE, on a scratch key under HKCU so the answer does
+    # not depend on what this host happens to have installed. Installed = 0 is a key
+    # that EXISTS and says no; it must not read as present.
+    $flagKey = 'HKCU:\Software\dev-workstation-selftest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    New-Item -Path $flagKey -Force | Out-Null
+    New-ItemProperty -Path $flagKey -Name 'On' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $flagKey -Name 'Off' -Value 0 -PropertyType DWord -Force | Out-Null
+    $realFile = Join-Path $env:windir 'System32\cmd.exe'
+    Check 'flag probe: Installed=1 + the file = present' `
+          (Test-DependencyPresent @{ RegKey = $flagKey; RegValue = 'On'; RegFile = $realFile })
+    Check 'flag probe: Installed=0 = absent, though the key exists' `
+          (-not (Test-DependencyPresent @{ RegKey = $flagKey; RegValue = 'Off'; RegFile = $realFile }))
+    Check 'flag probe: Installed=1 but the DLL gone = absent' `
+          (-not (Test-DependencyPresent @{ RegKey = $flagKey; RegValue = 'On'; RegFile = (Join-Path $env:windir 'System32\no-such-x9.dll') }))
+    Remove-Item -Path $flagKey -Recurse -Force -ErrorAction SilentlyContinue
+
+    # THE PAYLOAD CHECK. The web page is the case it exists for: a dead aka.ms link
+    # answers 200 with HTML, saved under the .exe name.
+    $payDir = Join-Path $env:TEMP ('payload-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $payDir -Force | Out-Null
+    $pageExe = Join-Path $payDir 'page.exe'; [IO.File]::WriteAllText($pageExe, '<!DOCTYPE html><html></html>')
+    $mzExe   = Join-Path $payDir 'mz.exe';   [IO.File]::WriteAllBytes($mzExe, [byte[]] (0x4D, 0x5A, 0x90, 0x00))
+    $oleMsi  = Join-Path $payDir 'ole.msi';  [IO.File]::WriteAllBytes($oleMsi, [byte[]] (0xD0, 0xCF, 0x11, 0xE0, 0xA1))
+    $mzMsi   = Join-Path $payDir 'mz.msi';   [IO.File]::WriteAllBytes($mzMsi, [byte[]] (0x4D, 0x5A, 0x90, 0x00))
+    Check 'payload: a web page saved as .exe is NOT an installer' (-not (Test-InstallerPayload $pageExe))
+    Check 'payload: MZ is an .exe'                                (Test-InstallerPayload $mzExe)
+    Check 'payload: D0CF11E0 is an .msi'                          (Test-InstallerPayload $oleMsi)
+    Check 'payload: an .exe saved under an .msi name is refused'  (-not (Test-InstallerPayload $mzMsi))
+    Check 'payload: a missing file is not an installer'           (-not (Test-InstallerPayload (Join-Path $payDir 'none.exe')))
+    # A REAL executable, so the MZ test is proven against more than bytes this test wrote.
+    Check 'payload: the real cmd.exe passes'                      (Test-InstallerPayload $realFile)
+    Remove-Item $payDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    # THE BOOTSTRAP TEST: which copies count as the repository.
+    $emptyDir = Join-Path $env:TEMP ('lone-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+    Check 'bootstrap: this copy is the repository'            (Test-IsClone $here)
+    Check 'bootstrap: a folder with only install.ps1 is NOT'  (-not (Test-IsClone $emptyDir))
+    Remove-Item $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
+    Check 'bootstrap: the clone URL is the public https copy' ($REPO_URL -like 'https://*')
+    # The owner's rule: directories this script creates go under one named root, not
+    # beside wherever install.ps1 was downloaded to.
+    Check 'bootstrap: the workspace root is the owner''s C:\WorkSpace' ($WORKSPACE_ROOT -eq 'C:\WorkSpace')
+    Check 'bootstrap: the clone lands INSIDE that root' `
+          ((Join-Path $WORKSPACE_ROOT 'dev-workstation') -eq 'C:\WorkSpace\dev-workstation')
+    # THE LOOKALIKE: the old behaviour was "beside this file", and a Downloads folder
+    # is exactly where that put a repository nobody would find again.
+    Check 'bootstrap: the clone is NOT beside the script' `
+          ((Join-Path $WORKSPACE_ROOT 'dev-workstation') -ne (Join-Path 'C:\Users\someone\Downloads' 'dev-workstation'))
+
     # THE EXTENSION LIST. -contains, never -like: the lookalike is a real risk.
     Check 'extension list names the Claude Code extension' ($VSCODE_EXTENSIONS -contains 'anthropic.claude-code')
     $fakeList = @('anthropic.claude-code-extra', 'ms-python.python')
@@ -878,8 +1234,8 @@ function Invoke-SelfTest {
     Check 'status: the stopped string matches its own test' ($stopped -match 'Worker is not running')
 
     # A dependency with no install route can only ever be reported as missing.
-    $unreachable = @($DEPS | Where-Object { (-not $_.Winget) -and (-not $_.Url) -and (-not $_.Script) })
-    Check 'every dependency has a winget id, a URL or an installer script' ($unreachable.Count -eq 0)
+    $unreachable = @($DEPS | Where-Object { (-not $_.Url) -and (-not $_.Script) })
+    Check 'every dependency has a URL or an installer script' ($unreachable.Count -eq 0)
 
     Write-Host ""
     if ($script:fails -eq 0) {
@@ -908,14 +1264,18 @@ function Invoke-UrlCheck {
     }
     # The control must 404. A version that will never exist.
     $rows += @{ Name = 'CONTROL(404)'; Url = 'https://nodejs.org/dist/v0.0.0/node-v0.0.0-x64.msi' }
+    # The SECOND control, for the aka.ms rows: a dead aka.ms link does NOT 404, it
+    # answers 200 with a bing.com page (measured 2026-10-07). So "200" alone is not
+    # "alive", and this control must come back as a web page - or the page test
+    # below is not telling anything apart.
+    $rows += @{ Name = 'CONTROL(html)'; Url = 'https://aka.ms/vs/17/release/no-such-file.x64.exe' }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $savedProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
     $bad = 0
-    $controlFailedAsItShould = $false
+    $controlsOk = 0
     foreach ($r in $rows) {
-        $isControl = ($r.Name -eq 'CONTROL(404)')
         try {
             $resp = Invoke-WebRequest -Uri $r.Url -Method Head -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
             # Content-Length comes back as a STRING ARRAY on PowerShell 7, and
@@ -924,20 +1284,36 @@ function Invoke-UrlCheck {
             $len = @($resp.Headers['Content-Length'])[0]
             $size = '?'
             if ($len) { $size = [string] [math]::Round([int64] $len / 1MB, 1) + ' MB' }
-            if ($isControl) {
-                Write-Host ("   {0,-14} HTTP {1,-4} {2}  <- CONTROL SHOULD HAVE FAILED" -f $r.Name, [int] $resp.StatusCode, $size) -ForegroundColor Red
+            # Every real row answered application/octet-stream or application/x-msi
+            # on 2026-10-07; only the dead link answered text/html.
+            $isPage = ([string] @($resp.Headers['Content-Type'])[0]) -like 'text/html*'
+            $line = "   {0,-14} HTTP {1,-4} {2}" -f $r.Name, [int] $resp.StatusCode, $size
+            if ($r.Name -eq 'CONTROL(404)') {
+                Write-Host "$line  <- CONTROL SHOULD HAVE FAILED" -ForegroundColor Red
                 $bad++
             }
-            else {
-                Write-Host ("   {0,-14} HTTP {1,-4} {2}" -f $r.Name, [int] $resp.StatusCode, $size) -ForegroundColor Green
+            elseif ($r.Name -eq 'CONTROL(html)') {
+                if ($isPage) {
+                    Write-Host "$line  a web page, as it should be - the page test discriminates" -ForegroundColor Green
+                    $controlsOk++
+                }
+                else {
+                    Write-Host "$line  <- CONTROL SHOULD HAVE BEEN A WEB PAGE" -ForegroundColor Red
+                    $bad++
+                }
             }
+            elseif ($isPage) {
+                Write-Host "$line  a WEB PAGE, not an installer - a dead link? bump this URL in `$DEPS" -ForegroundColor Red
+                $bad++
+            }
+            else { Write-Host $line -ForegroundColor Green }
         }
         catch {
             $code = ''
             if ($_.Exception.Response) { $code = [string] [int] $_.Exception.Response.StatusCode }
-            if ($isControl) {
+            if ($r.Name -eq 'CONTROL(404)') {
                 Write-Host ("   {0,-14} HTTP {1,-4} failed as it should - the probe discriminates" -f $r.Name, $code) -ForegroundColor Green
-                $controlFailedAsItShould = $true
+                $controlsOk++
             }
             else {
                 Write-Host ("   {0,-14} HTTP {1,-4} FAILED - bump this URL in `$DEPS" -f $r.Name, $code) -ForegroundColor Red
@@ -948,8 +1324,8 @@ function Invoke-UrlCheck {
     $ProgressPreference = $savedProgress
 
     Write-Host ""
-    if (-not $controlFailedAsItShould) {
-        Write-Host "   The 404 control did not fail, so this whole run means nothing." -ForegroundColor Red
+    if ($controlsOk -ne 2) {
+        Write-Host "   A control did not behave as it must, so this whole run means nothing." -ForegroundColor Red
         return 1
     }
     if ($bad -gt 0) {
@@ -1033,7 +1409,13 @@ if ($Cowork -eq 'ask' -and -not $CheckOnly) {
     Write-Host ""
     Write-Host "This run will, in order:" -ForegroundColor Cyan
     Write-Host "   1. install PowerShell 7 if it is missing, and continue under it"
-    Write-Host "   2. install any MISSING toolchain tool: git, node, python, claude"
+    if (-not (Test-IsClone $here)) {
+        Write-Host "      then, because this file was downloaded on its own: install Git for"
+        Write-Host "      Windows, clone $REPO_URL into"
+        Write-Host "      $(Join-Path $WORKSPACE_ROOT 'dev-workstation') and carry on from that copy"
+    }
+    Write-Host "   2. install any MISSING tool, in this order:"
+    Write-Host "      $(($DEPS | Where-Object { $_.Name -ne 'pwsh' } | ForEach-Object { $_.Name }) -join ', ')"
     Write-Host "   3. place the CLAUDE.md instruction files (Tools\deploy.py)"
     Write-Host "   4. install GitNexus and code-review-graph, their MCP entries and hooks"
     Write-Host "   5. install claude-mem - LOCAL cross-session memory, nothing uploaded"
@@ -1124,6 +1506,110 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     exit $LASTEXITCODE
 }
 
+# ---------------------------------- phase 1b: a lone install.ps1 clones the repository
+# GIT FOR WINDOWS BEFORE THE CLONE (owner, 2026-10-07). A fresh host has no git, so
+# `git clone` - the first line of the old instructions - could not run there, and the
+# README sent people to download a ZIP by hand. Now this file can be downloaded ON
+# ITS OWN and run: it installs git, clones the repository beside itself, and hands
+# the rest of the run to the CLONE's install.ps1.
+#
+# Handing over, rather than carrying on in this copy, is the point: everything after
+# this needs Tools\deploy.py and graph-servers\install.ps1, and the clone's
+# install.ps1 is the one written against them. This copy may be days older.
+#
+# Here, after PowerShell 7 and before the toolchain phase, so a lone copy installs
+# exactly two things itself - pwsh and git - and the clone does all the rest. A ZIP
+# download is not "lone": it has Tools\deploy.py, and skips this block.
+if (-not (Test-IsClone $here)) {
+    Write-Phase "Bootstrap: Git for Windows, then the repository"
+    # NOT beside this file. install.ps1 is downloaded to wherever the browser or the
+    # shell put it - Downloads, a Desktop, a temp folder - and a repository cloned
+    # there is a repository nobody will find again.
+    $clone = Join-Path $WORKSPACE_ROOT 'dev-workstation'
+    $gitDep = $DEPS | Where-Object { $_.Name -eq 'git' }
+    $haveGit = Test-DependencyPresent $gitDep
+    $haveClone = Test-IsClone $clone
+    Write-Host "   this install.ps1 has no repository around it - it was downloaded on its own"
+
+    # Check mode writes nothing, and cloning writes - so it can only go further when
+    # both git and the clone are already there.
+    if ($CheckOnly -and -not ($haveGit -and $haveClone)) {
+        if ($haveGit) { Write-Host "   git      present" -ForegroundColor Green }
+        else { Write-Host "   git      MISSING - a real run installs it first, via $(Get-InstallRoute $gitDep)" -ForegroundColor Yellow }
+        Write-Host "   a real run then clones $REPO_URL" -ForegroundColor Yellow
+        Write-Host "   into $clone and runs THAT copy's install.ps1 for everything else." -ForegroundColor Yellow
+        Write-Host "   Nothing further can be checked without the repository." -ForegroundColor Yellow
+        Stop-Run 0
+    }
+
+    if (-not $haveGit) {
+        if ($SkipDeps) {
+            Write-Host "   git is missing and -SkipDeps forbids installing it - nothing can be cloned." -ForegroundColor Red
+            Stop-Run 1
+        }
+        Write-Host "   installing git" -ForegroundColor Cyan
+        Write-Host "     via $(Get-InstallRoute $gitDep)"
+        Install-Dependency $gitDep
+        Update-PathFromRegistry
+        if (-not (Test-DependencyPresent $gitDep)) {
+            Write-Host "   installed, but git is still not resolvable. Open a new terminal" -ForegroundColor Red
+            Write-Host "   and run this script again." -ForegroundColor Red
+            Stop-Run 1
+        }
+    }
+
+    if ($haveClone) {
+        # Used as it is, never pulled: updating somebody's checkout is not this
+        # script's call, and a re-run must not change what it already set up.
+        Write-Host "   already cloned - using it as it is, NOT updating it: $clone" -ForegroundColor Green
+        Write-Host "   (to update it first:  git -C `"$clone`" pull)"
+    }
+    elseif (Test-Path -LiteralPath $clone) {
+        Write-Host "   $clone exists but is not a copy of this repository." -ForegroundColor Red
+        Write-Host "   Move it aside, or clone by hand, and run again." -ForegroundColor Red
+        Stop-Run 1
+    }
+    else {
+        # The root first, then the clone inside it - git clone will not create two
+        # levels, and a standard user is allowed to make this one (see $WORKSPACE_ROOT).
+        if (-not (Test-Path -LiteralPath $WORKSPACE_ROOT)) {
+            try { New-Item -ItemType Directory -Path $WORKSPACE_ROOT -ErrorAction Stop | Out-Null }
+            catch {
+                Write-Host "   cannot create $WORKSPACE_ROOT - $($_.Exception.Message)" -ForegroundColor Red
+                Stop-Run 1
+            }
+            Write-Host "   created $WORKSPACE_ROOT" -ForegroundColor Yellow
+        }
+        Write-Host "   git clone $REPO_URL"
+        & git clone $REPO_URL $clone 2>&1 | ForEach-Object { Write-Host "     $_" }
+        $cloneExit = $LASTEXITCODE
+        # Read it back: an exit code of 0 with no Tools\deploy.py is not a usable copy.
+        if (($cloneExit -ne 0) -or -not (Test-IsClone $clone)) {
+            Write-Host "   git clone failed (exit $cloneExit) - nothing else was installed." -ForegroundColor Red
+            Stop-Run 1
+        }
+        Write-Host "   cloned into $clone" -ForegroundColor Green
+    }
+
+    # Same handover as PowerShell 7's above: the same log file, our transcript
+    # stopped first, and -Cowork always bound so the clone never asks again. -Repo
+    # goes only if it was given: unbound, the clone's own default is the clone.
+    $bound = @{}
+    foreach ($kv in $PSBoundParameters.GetEnumerator()) { $bound[$kv.Key] = $kv.Value }
+    $bound['LogPath'] = $script:logFile
+    $bound['Cowork'] = $Cowork
+    $fwd = Get-ForwardArgs $bound
+    $child = Join-Path $clone 'install.ps1'
+    Write-Host "   handing over to $child"
+    Stop-RunLog
+    & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $child @fwd
+    # Fail closed on a child that never launched, as above. Stop-Run rather than a
+    # bare exit, so the console encoding set at the top is put back.
+    $childExit = $LASTEXITCODE
+    if ($null -eq $childExit) { $childExit = 1 }
+    Stop-Run $childExit
+}
+
 # Said AFTER the handover, so one run says it once: the 5.1 half exits above, and
 # the PowerShell 7 half is the one that gets here. Skipped when the question was
 # just asked, which already printed the answer.
@@ -1139,14 +1625,10 @@ if ($SkipDeps) { Write-Host "   -SkipDeps: reporting only, installing nothing" }
 
 # Probed ONCE and stated, because every install route below turns on it and a
 # reader should not have to infer it from which command ran.
-$script:hasWinget = [bool] (Get-Command winget -ErrorAction SilentlyContinue)
-if ($script:hasWinget) { Write-Host "   winget   present" -ForegroundColor Green }
-else {
-    Write-Host "   winget   NOT present - installers come from a direct download" -ForegroundColor Yellow
-    Write-Host "            (normal on Windows Server: it ships without App Installer,"
-    Write-Host "             and on Server 2022 winget cannot be added - Add-AppxPackage"
-    Write-Host "             is absent. Nothing here needs it.)"
-}
+Write-Host "   every tool below comes from a direct vendor download - winget is not used"
+Write-Host "   (it is absent on Windows Server, and broken out of the box on a clean"
+Write-Host "    Windows 11: measured 2026-10-07, three tools, three identical"
+Write-Host "    'Failed when opening source(s)' failures before the download anyway)"
 
 foreach ($d in $DEPS) {
     if (Test-DependencyPresent $d) {
@@ -1168,10 +1650,8 @@ if ($missing.Count -gt 0) {
     if ($CheckOnly) {
         Write-Host ""
         Write-Host "   would install: $names" -ForegroundColor Yellow
-        # WHICH ROUTE, not just which tool. On a host with no winget the answer is
-        # "it downloads these" - and that is the thing somebody staring at a bare
-        # server needs to know before they commit to a real run.
-        Write-Host ("   winget on this host: {0}" -f $(if ($script:hasWinget) { 'yes' } else { 'NO - everything below comes from a direct download' })) -ForegroundColor Yellow
+        # WHICH ROUTE, not just which tool. "It downloads these, from here" is the
+        # thing somebody staring at a bare server needs before they commit to a run.
         foreach ($d in $missing) {
             Write-Host ("     {0,-8} {1}" -f $d.Name, (Get-InstallRoute $d))
         }
@@ -1205,6 +1685,9 @@ if ($missing.Count -gt 0) {
             Write-Host "   installing $($d.Name)" -ForegroundColor Cyan
             Write-Host "     via $(Get-InstallRoute $d)"
             Install-Dependency $d
+            # A vendor installer that places a binary and leaves the PATH to a human
+            # is a tool this script installed and cannot reach. See the claude row.
+            if ($d.PathAdd) { Add-UserPathEntry (Join-Path $env:USERPROFILE $d.PathAdd) }
         }
         Update-PathFromRegistry
         Write-Host ""
@@ -1438,8 +1921,8 @@ if ($LASTEXITCODE -ne 0) {
 Write-Phase "Graph servers (graph-servers/install.ps1)"
 $graphArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $graph, '-Repo', $Repo)
 if ($Pdg) { $graphArgs += '-Pdg' }
-# -InstallPrereqs is NOT passed: phase 2 already installed whatever was missing, and
-# that flag's only route is winget, which this script deliberately does not need.
+# -InstallPrereqs is NOT passed: phase 2 already installed whatever was missing, by
+# direct download, which is the only route this script has.
 & pwsh @graphArgs 2>&1 | ForEach-Object { Write-Host $_ }
 $graphExit = $LASTEXITCODE
 if ($graphExit -ne 0) {
