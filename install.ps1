@@ -141,6 +141,43 @@ function Test-InstallExit {
     return (($Code -eq 0) -or ($Code -eq 3010) -or ($Code -eq 1638))
 }
 
+function Get-InstallExitHint {
+    <#
+      A raw installer exit code is not an answer, and for the code a standard user
+      actually gets it is worse than none: it reads as "this installer is broken".
+
+      Measured 2026-10-07 on a clean Windows 11 as a plain standard user: the run
+      stopped after a 112 MB download with the whole of its explanation being
+
+          pwsh: installer exited 1601
+
+      and the word "administrator" nowhere on the screen. These are the codes that
+      mean "you do not have the rights", in the vocabularies this script's two
+      install routes speak - msiexec and the Burn/Inno bundles.
+
+      PURE, so -SelfTest covers it offline. Returns an empty string for a code it has
+      nothing useful to add about, so the caller still prints the number.
+    #>
+    param([int] $Code)
+    switch ($Code) {
+        # The one a standard user actually hits. The Windows Installer service is
+        # reached over DCOM, and the service's own ACL is what refuses: measured on
+        # that host, msiserver grants start and query to Administrators, INTERACTIVE
+        # and SERVICE, and to nobody else.
+        1601 { return 'the Windows Installer service could not be reached - this usually means administrator rights are needed' }
+        1625 { return 'system policy forbids this installation - administrator rights, or a policy change, are needed' }
+        1925 { return 'this package needs administrator rights to install for all users' }
+        1603 { return 'the installer failed part-way; its own log has the reason, and insufficient rights is a common one' }
+        # Burn bundles (the VC++ runtime, python) answer this when they need to raise
+        # an elevation prompt and there is no interactive desktop to raise it on.
+        1459 { return 'the installer needed an interactive desktop to ask for elevation and had none - run it from a signed-in session, elevated' }
+        5    { return 'access denied - administrator rights are needed' }
+        740  { return 'this installer refuses to run without elevation' }
+        1223 { return 'the elevation prompt was cancelled' }
+        default { return '' }
+    }
+}
+
 function Test-IsClone {
     # Is $Dir a copy of the repository, or a lone install.ps1? The delegate is the
     # test, not .git: a ZIP download has no .git and is a perfectly good copy.
@@ -257,6 +294,64 @@ function Get-MissingDependency {
     # come back as the bare hashtable, whose .Count is its KEY count (7, not 1) and
     # whose [0] is $null.
     return ,$missing
+}
+
+function Get-Pwsh7Path {
+    <#
+      Where is PowerShell 7, if it is here at all? Phase 1 asks this twice and the
+      administrator gate asks it once, and all three have to agree - a gate that
+      judges pwsh present while phase 1 judges it missing would wave a standard user
+      through to the exact failure the gate exists to prevent.
+
+      ⛔ IT IS NOT `Get-Command pwsh`. The -ge 7 filter is what stops a relaunch
+      loop: PowerShell 6 is also called pwsh, would fail phase 1's -lt 7 gate, and
+      would relaunch itself for ever. That is also why the pwsh row cannot simply
+      carry a ProbeVersion and be probed like every other row.
+    #>
+    $p = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue |
+         Where-Object { $_.Version -and $_.Version.Major -ge 7 } |
+         Select-Object -First 1 -ExpandProperty Source
+    # Installed a moment ago means on disk but not yet on THIS shell's PATH.
+    if (-not $p) {
+        $probe = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+        if (Test-Path -LiteralPath $probe) { $p = $probe }
+    }
+    return $p
+}
+
+function Test-IsElevated {
+    # Is this process running with the Administrators group ENABLED in its token?
+    # Not "is the account in the group" - a UAC-split token answers no here while
+    # the account is an administrator, which is the right answer: an installer
+    # launched from this process gets this token, not the account's potential one.
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $pr = New-Object Security.Principal.WindowsPrincipal($id)
+    return $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Select-AdminBlocker {
+    <#
+      Of the rows that are MISSING, which ones can this user not install?
+
+      PURE - no probe, no registry, no token - so -SelfTest drives it offline with
+      rows it makes up, including the lookalike that must NOT stop a run: a standard
+      user whose only missing tools are user-scope ones is not blocked by anything.
+
+      An elevated run is never blocked, so it returns empty without looking at the
+      rows at all.
+
+      ⛔ EVERY CALLER WRAPS THE RESULT IN @(), and that is the whole contract - there
+      is deliberately no `return ,` here. The comma idiom Get-MissingDependency uses
+      protects a ONE-element result from unrolling to a bare hashtable, but it breaks
+      the EMPTY one: measured, `return ,@()` read back through @() has Count 1, not 0,
+      because the comma wraps the empty array in a one-element array. A gate that
+      counted 1 when nothing was blocking would stop every run on earth. Without the
+      comma, @() around the call gives 0, 1 and n correctly - which is why the
+      self-test drives this function the same way the gate does.
+    #>
+    param($Missing, [bool] $Elevated)
+    if ($Elevated) { return @() }
+    return @($Missing | Where-Object { $_.NeedsAdmin })
 }
 
 function Update-PathFromRegistry {
@@ -497,8 +592,20 @@ function Stop-Run {
 #
 # EVERY ROW IS A DIRECT VENDOR DOWNLOAD. There is no winget route - see the note in
 # Install-Dependency.
+#
+# ⛔ NeedsAdmin IS A MEASURED FIELD, NOT AN OPINION. It is what the administrator gate
+# near the top of the run reads, and a wrong value is worse in BOTH directions: a
+# wrong $true sends somebody to ask their IT department for rights they never needed,
+# and a wrong $false waves a standard user past the gate to die later on a raw
+# installer exit code - which is the whole bug the gate exists to remove. So every
+# row's value below cites the run that produced it, on a clean Windows 11 10.0.26200
+# as a plain standard user with no elevated token (2026-10-07), and a row with no
+# NeedsAdmin means "measured, and it does not need one".
 $DEPS = @(
-    @{ Name = 'pwsh'; Exe = 'pwsh';
+    # MEASURED: msiexec answered 1601 - "the Windows Installer service could not be
+    # accessed". A per-machine MSI, and the standard user cannot even Get-Service
+    # msiserver on that host. Nothing was installed and nothing was left behind.
+    @{ Name = 'pwsh'; Exe = 'pwsh'; NeedsAdmin = $true;
        Url = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi';
        File = 'PowerShell-7.6.6-win-x64.msi'; Args = @('/qn', '/norestart', 'ADD_PATH=1') }
 
@@ -511,6 +618,14 @@ $DEPS = @(
     # filename carries the version, so a pin goes stale on every Git release.
     # LatestMatch must stay anchored - the same release ships MinGit-*-64-bit.zip,
     # PortableGit-*-64-bit.7z.exe and Git-*-64-bit.tar.bz2 beside the installer.
+    #
+    # ⭐ NO NeedsAdmin, AND THAT IS MEASURED, NOT ASSUMED. Git for Windows is an Inno
+    # installer that falls back to a per-user install when it is not elevated. Run as
+    # a plain standard user with exactly the arguments below it answered EXIT 0 and
+    # landed in %LOCALAPPDATA%\Programs\Git\cmd\git.exe, adding that directory to the
+    # USER PATH itself. Listing git as administrator-only would have sent people to
+    # ask for rights they do not need - which is why the field is measured row by row
+    # rather than inferred from "it normally goes in Program Files".
     @{ Name = 'git'; Exe = 'git';
        LatestApi = 'https://api.github.com/repos/git-for-windows/git/releases/latest';
        LatestMatch = '^Git-[0-9.]+-64-bit\.exe$';
@@ -535,6 +650,11 @@ $DEPS = @(
     #               the toolchain phase then needs IN THE SAME RUN. The user
     #               installer writes that to HKCU, and Update-PathFromRegistry
     #               rebuilds from Machine AND User, so it lands without a re-open.
+    #
+    # No NeedsAdmin, MEASURED: run with exactly these arguments by a plain standard
+    # user it answered EXIT 0, landed in
+    # %LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe, and added its own bin
+    # directory to the USER PATH. This is what the -user installer is for.
     @{ Name = 'vscode'; Exe = 'code';
        Url = 'https://update.code.visualstudio.com/latest/win32-x64-user/stable';
        File = 'VSCodeUserSetup-x64.exe';
@@ -563,13 +683,22 @@ $DEPS = @(
     # place. Add a minimum when TortoiseGit names one.
     #
     # It answers 1638 when the machine is already NEWER - see Test-InstallExit.
-    @{ Name = 'vcredist-x64'; Exe = $null;
+    # NeedsAdmin, and here the measurement needs reading carefully. Run as a standard
+    # user the bundle answered EXIT 1459, ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION -
+    # which is the bundle saying it has no desktop to raise an elevation prompt on,
+    # not a privilege verdict of its own. What settles it is the DESTINATION: this row
+    # is satisfied by vcruntime140.dll under System32 / SysWOW64 and an HKLM key, and
+    # the same account was measured unable to write either. A system runtime is
+    # machine-wide by its nature; there is no per-user form of it to fall back to.
+    @{ Name = 'vcredist-x64'; Exe = $null; NeedsAdmin = $true;
        RegKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'; RegValue = 'Installed';
        RegFile = (Join-Path $env:windir 'System32\vcruntime140.dll');
        Url = 'https://aka.ms/vs/17/release/vc_redist.x64.exe';
        File = 'vc_redist.x64.exe'; Args = @('/install', '/quiet', '/norestart') }
 
-    @{ Name = 'vcredist-x86'; Exe = $null;
+    # Same as vcredist-x64 above: 1459 from the bundle, and a destination (SysWOW64
+    # plus a WOW6432Node key) that this account provably cannot write.
+    @{ Name = 'vcredist-x86'; Exe = $null; NeedsAdmin = $true;
        RegKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86'; RegValue = 'Installed';
        RegFile = (Join-Path $env:windir 'SysWOW64\vcruntime140.dll');
        Url = 'https://aka.ms/vs/17/release/vc_redist.x86.exe';
@@ -584,7 +713,11 @@ $DEPS = @(
     # It resolves its own current version from the project's version-check endpoint
     # (see Resolve-TortoiseGitAsset); the pin below is only the fallback. An .msi,
     # so Install-Dependency hands it to msiexec and Args are msiexec's, not Inno's.
-    @{ Name = 'tortoisegit'; Exe = $null;
+    # NeedsAdmin: measured 1601 from msiexec, and it could not be otherwise - a shell
+    # extension IS an HKLM registration, so there is no per-user form of this tool to
+    # install instead. This is one of the two rows that keep a standard user from
+    # finishing on their own.
+    @{ Name = 'tortoisegit'; Exe = $null; NeedsAdmin = $true;
        RegKey = 'HKLM:\SOFTWARE\TortoiseGit'; RegValue = 'Directory';
        RegFile = 'bin\TortoiseGitProc.exe';
        Resolver = 'tortoisegit';
@@ -593,7 +726,9 @@ $DEPS = @(
        File = 'TortoiseGit-2.19.1.0-64bit.msi'; Args = @('/qn', '/norestart') }
 
     # npm has no row: it ships with node, and there is no separate npm download.
-    @{ Name = 'node'; Exe = 'node';
+    # NeedsAdmin: measured 1601. A per-machine MSI, and its destination is the nodejs
+    # directory under Program Files, which a standard user cannot write.
+    @{ Name = 'node'; Exe = 'node'; NeedsAdmin = $true;
        Url = 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi';
        File = 'node-v24.21.0-x64.msi'; Args = @('/qn', '/norestart') }
 
@@ -613,6 +748,29 @@ $DEPS = @(
     #       Execution Aliases.        exit 9009
     # Asking the tool to say what it is costs one process and cannot be fooled by a
     # stub, which a path blacklist can.
+    #
+    # ⚠ NO NeedsAdmin, AND THIS IS THE ONE ROW WHERE THAT IS REASONED RATHER THAN
+    # MEASURED CLEAN. Run by a standard user over SSH it answered 1601, which looks
+    # like "needs an administrator" and is not. Its own bundle log shows it had
+    # already chosen a fully per-user plan - WixBundleElevated = 0, every package
+    # _JustForMe - and the per-package MSI log names the real failure:
+    #     Client-side and UI is none or basic: Running entire install on the server.
+    #     Failed to connect to server. Error: 0x80070005
+    # A silent install hands the transaction to the Windows Installer SERVICE, and
+    # that service's ACL on the test host grants access to Administrators (BA),
+    # INTERACTIVE (IU) and SERVICE (SU) - to nobody else. An SSH key logon produces a
+    # token holding NT AUTHORITY\NETWORK and NOT INTERACTIVE, measured for both the
+    # standard and the administrator account; the administrator still got through
+    # because of BA, and msiexec /a over the same SSH answered EXIT 0 for it as a
+    # control. Starting the service first changed nothing - the standard user cannot
+    # even sc query it - which rules out "it only needed starting".
+    # ⇒ A standard user SIGNED IN AT THE MACHINE is in INTERACTIVE and does hold
+    # those rights, so this row is expected to install for them. It is NOT listed as
+    # administrator-only on the strength of a failure the test transport caused.
+    # UNCONFIRMED until somebody runs it from a signed-in desktop session; if that
+    # measurement contradicts this, add NeedsAdmin here and to README.md. Meanwhile
+    # the cost of being wrong is bounded: Get-InstallExitHint turns 1601 into a
+    # sentence naming administrator rights instead of a bare number.
     @{ Name = 'python'; Exe = 'python'; ProbeVersion = '^\s*Python\s+\d+\.\d+';
        Url = 'https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe';
        File = 'python-3.13.15-amd64.exe';
@@ -988,6 +1146,11 @@ function Install-Dependency {
         $proc = Start-Process -FilePath $dest -ArgumentList $Dep.Args -Wait -PassThru
     }
     if (-not (Test-InstallExit $proc.ExitCode)) {
+        # The administrator gate at the top of the run catches the rows we KNOW need
+        # elevation. This catches the ones we do not: a host whose policy locks down
+        # something the gate lets through still has to say WHY in words.
+        $hint = Get-InstallExitHint $proc.ExitCode
+        if ($hint) { throw "$($Dep.Name): installer exited $($proc.ExitCode) - $hint" }
         throw "$($Dep.Name): installer exited $($proc.ExitCode)"
     }
 }
@@ -1275,6 +1438,74 @@ function Invoke-SelfTest {
     $unreachable = @($DEPS | Where-Object { (-not $_.Url) -and (-not $_.Script) })
     Check 'every dependency has a URL or an installer script' ($unreachable.Count -eq 0)
 
+    # ---------------------------------------------- the administrator gate
+    # Rows made up here, never $DEPS, so these cases keep saying what they mean after
+    # the table changes. The $DEPS membership is asserted separately, below.
+    $fakeAdmin = @{ Name = 'needs-admin'; NeedsAdmin = $true }
+    $fakeUser  = @{ Name = 'user-scope' }
+    $fakeUser2 = @{ Name = 'user-scope-2' }
+
+    $elev = @(Select-AdminBlocker @($fakeAdmin, $fakeUser) $true)
+    Check 'gate: an ELEVATED run is never blocked, even by an admin-only row' ($elev.Count -eq 0)
+
+    # ⛔ THE LOOKALIKE, and the case most worth having. A standard user whose missing
+    # tools are all user-scope must run STRAIGHT THROUGH. A gate that stopped here
+    # would be worse than no gate: it would turn a working install into a demand for
+    # rights nobody needs. Measured on a clean Windows 11, git and VS Code both
+    # install for a standard user with exit 0 - so this is a real shape, not a
+    # hypothetical one.
+    $lookalike = @(Select-AdminBlocker @($fakeUser, $fakeUser2) $false)
+    Check 'gate: a NON-elevated run with only user-scope rows missing is NOT blocked' ($lookalike.Count -eq 0)
+
+    $blocked = @(Select-AdminBlocker @($fakeUser, $fakeAdmin, $fakeUser2) $false)
+    Check 'gate: a non-elevated run IS blocked by an admin-only missing row' ($blocked.Count -eq 1)
+    Check 'gate: and it names exactly that row' ($blocked[0].Name -eq 'needs-admin')
+
+    $none = @(Select-AdminBlocker @() $false)
+    Check 'gate: nothing missing, nothing blocked' ($none.Count -eq 0)
+
+    # The single-element unroll trap: read back the way the gate reads it, ONE row
+    # must count as 1 and not as the hashtable's key count.
+    $one = Select-AdminBlocker @($fakeAdmin) $false
+    Check 'gate: ONE blocking row counts as 1, not as its key count' (@($one).Count -eq 1)
+
+    # ⛔ AND THE OPPOSITE TRAP, which is the one that actually bit. `return ,@()` -
+    # the comma idiom used two functions above - survives @() as a ONE-element array
+    # holding an empty array, so a gate written that way would stop every run on a
+    # machine where nothing at all is missing. These two cases are a pair: neither
+    # catches the other, and the first three attempts passed the one above while
+    # failing this one.
+    $emptyBoth = (@(Select-AdminBlocker @($fakeAdmin) $true).Count -eq 0) -and
+                 (@(Select-AdminBlocker @() $false).Count -eq 0)
+    Check 'gate: an empty result is EMPTY after @(), not a list of one empty list' $emptyBoth
+    # The same shape, stated against the real helper the gate feeds on, so a later
+    # "tidy-up" that wraps it in @() fails here instead of in front of a user.
+    Check 'gate: ,@() read back through @() really does count 1 - the trap is real' ((@(& { return ,@() })).Count -eq 1)
+
+    # The exact set, by name - not a count. A count widens silently the day somebody
+    # adds a row; this fails and makes them say which way it goes.
+    $adminNames = (@($DEPS | Where-Object { $_.NeedsAdmin } | ForEach-Object { $_.Name }) | Sort-Object) -join ','
+    $expectAdmin = (@('node', 'pwsh', 'tortoisegit', 'vcredist-x64', 'vcredist-x86') | Sort-Object) -join ','
+    Check "gate: NeedsAdmin is exactly {$expectAdmin}" ($adminNames -eq $expectAdmin)
+
+    # And the other direction, named one by one, because each of these was MEASURED
+    # installing with no rights at all on a clean Windows 11. A later edit that marks
+    # one of them administrator-only would send people to their IT department for
+    # nothing, and this is what catches it.
+    foreach ($n in @('git', 'vscode', 'python', 'uv', 'claude')) {
+        $row = $DEPS | Where-Object { $_.Name -eq $n }
+        Check "gate: $n is NOT administrator-only" ((@($row).Count -eq 1) -and (-not $row.NeedsAdmin))
+    }
+
+    # ---------------------------------------------- the exit-code hints
+    Check 'hint: 1601 says administrator' ((Get-InstallExitHint 1601) -match 'administrator')
+    Check 'hint: 5 says administrator' ((Get-InstallExitHint 5) -match 'administrator')
+    Check 'hint: 1459 mentions the missing desktop' ((Get-InstallExitHint 1459) -match 'desktop')
+    # A code with nothing useful to say must return EMPTY, so the caller falls back to
+    # printing the bare number rather than an invented explanation.
+    Check 'hint: an unknown code adds nothing' ((Get-InstallExitHint 4321) -eq '')
+    Check 'hint: success adds nothing' ((Get-InstallExitHint 0) -eq '')
+
     Write-Host ""
     if ($script:fails -eq 0) {
         Write-Host "   self-test: all passed" -ForegroundColor Green
@@ -1435,6 +1666,76 @@ if (@($args | Where-Object { "$_" -match '^-+all$' }).Count -gt 0) {
     Write-Host "      are now installed by default, so there is nothing left for it to turn on." -ForegroundColor Yellow
 }
 
+# --------------------------------------------------------- the administrator gate
+# ⛔ FIRST, BEFORE THE QUESTION AND BEFORE THE FIRST DOWNLOAD. What a standard user
+# used to get was a raw MSI exit code, after a 112 MB download, with the word
+# "administrator" nowhere on the screen (measured 2026-10-07 on a clean Windows 11):
+#
+#     == PowerShell 7
+#        not found - installing it
+#        downloading https://github.com/PowerShell/PowerShell/.../PowerShell-7.6.6-win-x64.msi
+#        installing PowerShell-7.6.6-win-x64.msi (silent)
+#     pwsh: installer exited 1601
+#
+# The run stopped and left nothing behind, which was right. The MESSAGE was the bug.
+#
+# WHAT THIS GATE IS NOT. It does not refuse a standard user - most of this table
+# installs perfectly well without any rights at all, and that is measured per row (see
+# NeedsAdmin on $DEPS). It stops only when something that is MISSING cannot be
+# installed by this account, and then it names those things and what to do about them.
+# A standard user whose only missing tools are user-scope ones runs straight through.
+#
+# Rows are checked AFTER rebuilding PATH from the registry. Without that, an
+# administrator who installed git in another window a minute ago would still be told
+# to go and install git.
+if (-not $SkipDeps) {
+    Update-PathFromRegistry
+    # ⚠ NOT @(Get-MissingDependency $DEPS). That helper returns `,$missing`, and the
+    # comma that saves a ONE-row result from unrolling turns an EMPTY one into a
+    # one-element array holding an empty array the moment @() is wrapped round it -
+    # measured. On a fully installed machine the gate would then be reasoning about a
+    # list of one thing that is not a dependency. Assigned plainly, as phase 2 does
+    # it, the count is right at 0, 1 and n.
+    $gateMissing = Get-MissingDependency $DEPS
+    # pwsh is the one row this script does not judge with Test-DependencyPresent:
+    # phase 1 uses a stricter test, because PowerShell 6 is also called pwsh. A gate
+    # that disagreed with phase 1 would wave the user through to the exact failure it
+    # exists to prevent.
+    if ((-not (Get-Pwsh7Path)) -and (@($gateMissing | Where-Object { $_.Name -eq 'pwsh' }).Count -eq 0)) {
+        $gateMissing = @($DEPS | Where-Object { $_.Name -eq 'pwsh' }) + $gateMissing
+    }
+
+    $gateBlockers = @(Select-AdminBlocker $gateMissing (Test-IsElevated))
+    if ($gateBlockers.Count -gt 0) {
+        Write-Host ""
+        Write-Host "STOP - this account cannot install everything that is missing." -ForegroundColor Red
+        Write-Host ""
+        Write-Host "   You are running without administrator rights, and these are both MISSING" -ForegroundColor Yellow
+        Write-Host "   and installable only by an administrator:" -ForegroundColor Yellow
+        Write-Host ""
+        foreach ($b in $gateBlockers) {
+            Write-Host ("     {0,-14} {1}" -f $b.Name, (Get-InstallRoute $b)) -ForegroundColor Yellow
+        }
+        Write-Host ""
+        Write-Host "   Two ways past this, either is fine:" -ForegroundColor Cyan
+        Write-Host "     1. Run this script again from a PowerShell started with 'Run as"
+        Write-Host "        administrator', if you have an administrator account on this machine."
+        Write-Host "     2. Ask whoever administers this machine to install the tools listed"
+        Write-Host "        above from those addresses, once. Then run this script again as"
+        Write-Host "        yourself - everything else installs without any rights at all."
+        Write-Host ""
+        Write-Host "   README.md, section 'What needs an administrator', is the same list with" -ForegroundColor Cyan
+        Write-Host "   the reason for each one." -ForegroundColor Cyan
+        if ($CheckOnly) {
+            Write-Host ""
+            Write-Host "   -CheckOnly: a real run would STOP here. Carrying on with the report." -ForegroundColor Yellow
+        }
+        else {
+            Stop-Run 1
+        }
+    }
+}
+
 # --------------------------------------------------- the plan, and the one question
 # ASKED HERE, BEFORE ANYTHING IS INSTALLED, and never again later in the run. A
 # question raised forty minutes in, behind a third-party installer's output, is a
@@ -1475,16 +1776,10 @@ if ($Cowork -eq 'ask' -and -not $CheckOnly) {
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Phase "PowerShell 7"
-    # The -ge 7 filter is what stops a relaunch loop: a pwsh that is PowerShell 6
-    # would fail this same gate and relaunch itself forever.
-    $pwshPath = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue |
-                Where-Object { $_.Version -and $_.Version.Major -ge 7 } |
-                Select-Object -First 1 -ExpandProperty Source
-    # Installed a moment ago means on disk but not yet on THIS shell's PATH.
-    if (-not $pwshPath) {
-        $probe = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
-        if (Test-Path -LiteralPath $probe) { $pwshPath = $probe }
-    }
+    # Get-Pwsh7Path, not Get-Command - see its own header for why. The administrator
+    # gate above asks the SAME function, so the two cannot disagree about whether
+    # PowerShell 7 is here.
+    $pwshPath = Get-Pwsh7Path
 
     if (-not $pwshPath) {
         if ($CheckOnly) {
@@ -1499,13 +1794,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
         Write-Host "   not found - installing it"
         Install-Dependency ($DEPS | Where-Object { $_.Name -eq 'pwsh' })
         Update-PathFromRegistry
-        $pwshPath = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Version -and $_.Version.Major -ge 7 } |
-                    Select-Object -First 1 -ExpandProperty Source
-        if (-not $pwshPath) {
-            $probe = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
-            if (Test-Path -LiteralPath $probe) { $pwshPath = $probe }
-        }
+        $pwshPath = Get-Pwsh7Path
         if (-not $pwshPath) {
             Write-Host "   installed, but pwsh is still not resolvable. Open a new terminal" -ForegroundColor Red
             Write-Host "   and run this script again." -ForegroundColor Red

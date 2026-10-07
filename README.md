@@ -38,6 +38,47 @@ One command turns a bare Windows host into a working Claude Code development env
 
 ## 使用方式
 
+### 需要系統管理員的項目
+
+**大部分的安裝不需要任何權限。** 以下五項是例外——它們一定要有系統管理員才裝得起來，因為
+它們寫進 `C:\Program Files`、`System32` 或 `HKEY_LOCAL_MACHINE`，而一般使用者帳戶對這三個
+地方都沒有寫入權。
+
+| 項目 | 為什麼一定要管理員 | 下載位址 |
+|---|---|---|
+| PowerShell 7 | 全機器安裝的 MSI，裝進 `C:\Program Files\PowerShell` | https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi |
+| Node.js | 全機器安裝的 MSI，裝進 `C:\Program Files\nodejs` | https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi |
+| Microsoft Visual C++ Redistributable 2015–2022（x64） | 系統執行階段，檔案放進 `System32`，並寫 `HKLM` | https://aka.ms/vs/17/release/vc_redist.x64.exe |
+| Microsoft Visual C++ Redistributable 2015–2022（x86） | 同上，放進 `SysWOW64` | https://aka.ms/vs/17/release/vc_redist.x86.exe |
+| TortoiseGit | 它是檔案總管的 shell extension，而 shell extension 就是一筆 `HKLM` 註冊，沒有「只裝給我自己」的版本 | https://download.tortoisegit.org/ |
+
+這五項只需要請管理員裝**一次**。裝完之後，往後所有的安裝與更新，你都可以用自己的一般帳戶
+執行，不必再找任何人。
+
+**不需要管理員的項目**（2026-10-07 在全新的 Windows 11 上，用一個純粹的一般使用者帳戶實測）：
+
+- **Git for Windows**——沒有管理員權限時它會自動改成只裝給目前使用者，裝進
+  `~\AppData\Local\Programs\Git`，並且自己把路徑加進使用者的 PATH。實測結束碼 0
+- **VS Code**——本專案用的是使用者版安裝檔，裝進 `~\AppData\Local\Programs`。實測結束碼 0
+- **Python**——以 `InstallAllUsers=0` 安裝，整包都只裝給目前使用者
+- **uv** 與 **claude**——原廠安裝指令碼，裝進 `~\.local\bin`
+- 其後所有階段：`Tools/deploy.py`、圖譜伺服器、claude-mem、Claude Code 外掛
+
+### 沒有管理員權限時腳本會怎麼做
+
+它會在**最開始、還沒下載任何東西之前**先檢查一次：
+
+1. 判斷目前這個行程有沒有系統管理員權限
+2. 檢查上表五項裡，哪些是這台機器上**還缺的**（已經裝好的不算）
+3. 如果一項都不缺，就直接往下跑——一般使用者帳戶可以把整套裝完
+4. 如果有缺，就把缺的那幾項連同下載位址列出來，告訴你兩條路（自己用系統管理員身分重跑，
+   或請管理員裝那幾項），然後**停下來**
+
+停下來的時候它什麼都還沒做：沒有下載、沒有安裝、沒有改 PATH、沒有建立任何資料夾。
+
+⚠ 這個檢查只看「缺的」項目。如果 PowerShell 7、Node.js、VC++ 執行階段和 TortoiseGit 都已經
+在這台機器上了，那麼一個完全沒有管理員權限的帳戶執行這支腳本會一路跑完，不會被擋。
+
 ### 第一次安裝
 
 **全新主機（什麼都還沒裝、連 `git` 都沒有）**——只下載 `install.ps1` 這一個檔案，直接執行：
@@ -228,6 +269,57 @@ Each folder carries its own step-by-step guide. Those are the ones to read when 
 fails or you want to take over by hand.
 
 ## How to use it
+
+### What needs an administrator
+
+**Most of this install needs no special rights at all.** These five are the exception.
+They cannot be installed without an administrator because they write to
+`C:\Program Files`, `System32` or `HKEY_LOCAL_MACHINE`, and a standard user account can
+write to none of those.
+
+| Tool | Why it needs an administrator | Download |
+|---|---|---|
+| PowerShell 7 | A per-machine MSI, into `C:\Program Files\PowerShell` | https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi |
+| Node.js | A per-machine MSI, into `C:\Program Files\nodejs` | https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi |
+| Microsoft Visual C++ Redistributable 2015–2022 (x64) | A system runtime: its DLLs go in `System32` and it writes `HKLM` | https://aka.ms/vs/17/release/vc_redist.x64.exe |
+| Microsoft Visual C++ Redistributable 2015–2022 (x86) | The same, into `SysWOW64` | https://aka.ms/vs/17/release/vc_redist.x86.exe |
+| TortoiseGit | It is an Explorer shell extension, and a shell extension *is* an `HKLM` registration. There is no install-for-me-only form of it | https://download.tortoisegit.org/ |
+
+An administrator installs those five **once**. After that you run every install and every
+update from your own ordinary account, without asking anyone.
+
+**What does not need an administrator** — measured on a clean Windows 11 on 2026-10-07,
+from a plain standard user account:
+
+- **Git for Windows** — unelevated, its installer falls back to a per-user install into
+  `~\AppData\Local\Programs\Git` and adds that directory to your user PATH itself.
+  Measured: exit code 0
+- **VS Code** — this project uses the per-user installer, which lands in
+  `~\AppData\Local\Programs`. Measured: exit code 0
+- **Python** — installed with `InstallAllUsers=0`, so the whole package is yours alone
+- **uv** and **claude** — vendor install scripts, into `~\.local\bin`
+- And every phase after the toolchain: `Tools/deploy.py`, the graph servers, claude-mem,
+  the Claude Code plugins
+
+### What the script does when you are not an administrator
+
+It checks once, at the very start, before downloading anything:
+
+1. Does this process hold administrator rights?
+2. Of the five tools above, which are **missing** on this machine? Ones already installed
+   do not count.
+3. Nothing missing — it carries straight on. A standard user can complete the whole
+   install.
+4. Something missing — it lists exactly those, with the addresses above, gives you the two
+   ways forward (re-run it yourself as an administrator, or ask an administrator to
+   install that list once), and **stops**.
+
+When it stops it has done nothing: nothing downloaded, nothing installed, no PATH changed,
+no directory created.
+
+⚠ The check looks only at what is MISSING. On a machine that already has PowerShell 7,
+Node.js, the VC++ runtimes and TortoiseGit, an account with no administrator rights at all
+runs this script from end to end and is never stopped.
 
 ### First install
 
