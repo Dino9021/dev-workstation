@@ -148,11 +148,35 @@ function Get-ForwardArgs {
     return ,$fwd
 }
 
+function Test-DependencyPresent {
+    <#
+      Is it already installed? Get-Command answers that for anything that lands on
+      PATH, which is most of this table - but NOT TortoiseGit, which puts nothing
+      there at all. A row may therefore name a registry probe instead.
+
+      ⛔ THE REGISTRY PROBE IS TWO HALVES, and both must hold: the key's value names
+      a directory, and the executable has to actually be under it. A key left behind
+      by an uninstall satisfies the first on its own, and a one-half probe would
+      then report a missing tool as present for ever - the same trap
+      Test-PluginInstalled documents for the plugin cache.
+    #>
+    param($Dep)
+    if ($Dep.RegKey) {
+        $dir = $null
+        try { $dir = (Get-ItemProperty -Path $Dep.RegKey -Name $Dep.RegValue -ErrorAction Stop).$($Dep.RegValue) }
+        catch { return $false }
+        if (-not $dir) { return $false }
+        return (Test-Path -LiteralPath (Join-Path $dir $Dep.RegFile))
+    }
+    if (-not $Dep.Exe) { return $false }
+    return [bool] (Get-Command $Dep.Exe -ErrorAction SilentlyContinue)
+}
+
 function Get-MissingDependency {
     param($Deps)
     $missing = @()
     foreach ($d in $Deps) {
-        if (-not (Get-Command $d.Exe -ErrorAction SilentlyContinue)) { $missing += $d }
+        if (-not (Test-DependencyPresent $d)) { $missing += $d }
     }
     # Comma for the same reason as Get-ForwardArgs: one missing tool would otherwise
     # come back as the bare hashtable, whose .Count is its KEY count (7, not 1) and
@@ -345,6 +369,9 @@ $script:prevConsoleEncoding = $null
 # test that reads it is reading a variable, not relying on an unassigned one being
 # $null - which is the same answer right up until somebody adds Set-StrictMode.
 $script:coworkAsked = $false
+# Collected by phase 2b and read by the closing advice, so a failed extension is
+# named there rather than scrolling past in the middle of the run.
+$extFailed = @()
 
 function Start-RunLog {
     param([string] $Path)
@@ -397,6 +424,28 @@ $DEPS = @(
        Url = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi';
        File = 'PowerShell-7.6.6-win-x64.msi'; Args = @('/qn', '/norestart', 'ADD_PATH=1') }
 
+    # ⭐ NO RESOLVER AND NO PIN TO ROT. This URL is a permanent alias that always
+    # serves the CURRENT user installer - measured 2026-10-07, it redirected to
+    # VSCodeUserSetup-x64-1.140.0.exe. So the URL itself is the resolution.
+    #
+    # ...-user/..., NOT -system: the owner asked for the per-user install, which
+    # needs no administrator and puts Code in %LOCALAPPDATA%\Programs.
+    #
+    # File is a FIXED name because the redirect carries the version and $dest must
+    # not change shape from run to run. It must stay .exe: Install-Dependency picks
+    # the msiexec branch purely by that extension.
+    #
+    # MERGETASKS is load-bearing, both halves:
+    #   !runcode  - do NOT launch the editor when a script finishes installing it
+    #   addtopath - put `code` on PATH, which the Claude Code extension step after
+    #               the toolchain phase then needs IN THE SAME RUN. The user
+    #               installer writes that to HKCU, and Update-PathFromRegistry
+    #               rebuilds from Machine AND User, so it lands without a re-open.
+    @{ Name = 'vscode'; Exe = 'code'; Winget = 'Microsoft.VisualStudioCode';
+       Url = 'https://update.code.visualstudio.com/latest/win32-x64-user/stable';
+       File = 'VSCodeUserSetup-x64.exe';
+       Args = @('/VERYSILENT', '/NORESTART', '/MERGETASKS=!runcode,addtopath') }
+
     # git resolves its own current release before falling back to the pin: the
     # filename carries the version, so a pin goes stale on every Git release.
     # LatestMatch must stay anchored - the same release ships MinGit-*-64-bit.zip,
@@ -404,8 +453,26 @@ $DEPS = @(
     @{ Name = 'git'; Exe = 'git'; Winget = 'Git.Git';
        LatestApi = 'https://api.github.com/repos/git-for-windows/git/releases/latest';
        LatestMatch = '^Git-[0-9.]+-64-bit\.exe$';
+       Resolver = 'github';
        Url = 'https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe';
        File = 'Git-2.55.0.5-64-bit.exe'; Args = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-') }
+
+    # TortoiseGit puts NOTHING on PATH, so Get-Command can never find it. Its probe
+    # is the registry key it writes, and then the executable under the directory
+    # that key names - both halves, because a key left behind by an uninstall would
+    # otherwise report a missing tool as present. Measured 2026-10-07 on this host:
+    # HKLM:\SOFTWARE\TortoiseGit\Directory = C:\Program Files\TortoiseGit\.
+    #
+    # It resolves its own current version from the project's version-check endpoint
+    # (see Resolve-TortoiseGitAsset); the pin below is only the fallback. An .msi,
+    # so Install-Dependency hands it to msiexec and Args are msiexec's, not Inno's.
+    @{ Name = 'tortoisegit'; Exe = $null; Winget = 'TortoiseGit.TortoiseGit';
+       RegKey = 'HKLM:\SOFTWARE\TortoiseGit'; RegValue = 'Directory';
+       RegFile = 'bin\TortoiseGitProc.exe';
+       Resolver = 'tortoisegit';
+       LatestIni = 'https://versioncheck.tortoisegit.org/version.txt';
+       Url = 'https://download.tortoisegit.org/tgit/2.19.0.0/TortoiseGit-2.19.1.0-64bit.msi';
+       File = 'TortoiseGit-2.19.1.0-64bit.msi'; Args = @('/qn', '/norestart') }
 
     # npm has no row: it ships with node, and a row for it would ask winget to
     # install a package that does not exist.
@@ -451,6 +518,17 @@ $DEPS = @(
 # ⚠ NOT INCLUDED HERE: claude-mem's two plugins. The local one is registered by
 # `npx claude-mem install` in phase 5, not by a plugin command, and the cloud half
 # (Cowork) is the one question this script asks - see -Cowork.
+# VS Code extensions, installed through the editor's own CLI after the toolchain
+# phase has put `code` on PATH. EXACT ids - the phase matches them with -contains,
+# never -like, because `anthropic.claude-code-extra` would satisfy a prefix match
+# and is a different extension. Verified 2026-10-07: `code --list-extensions`
+# returns `anthropic.claude-code` on a host where the extension is installed, and
+# `code --install-extension anthropic.claude-code` exits 0 and is idempotent
+# ("already installed").
+$VSCODE_EXTENSIONS = @(
+    'anthropic.claude-code'
+)
+
 $PLUGINS = @(
     @{ Name = 'dispatch-guard'; Source = 'Dino9021/dispatch-guard';
        Market = 'dispatch-guard'; Plugin = 'dispatch-guard';
@@ -513,6 +591,31 @@ function Resolve-LatestAsset {
     catch { return $null }
 }
 
+function Resolve-TortoiseGitAsset {
+    <#
+      TortoiseGit publishes no GitHub release feed - api.github.com/.../TortoiseGit
+      answers 404 - but it serves the endpoint its own updater reads, an INI with
+      BOTH the current version and the directory that version lives under. Those two
+      do NOT agree, and that is the trap: version 2.19.1.0 lives under .../2.19.0.0/.
+      So the directory is TAKEN FROM THE FEED, never derived from the version.
+      Measured 2026-10-07.
+
+      Both halves must parse or this returns $null and the caller uses the pin.
+    #>
+    param($Dep)
+    if (-not $Dep.LatestIni) { return $null }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $ini = (Invoke-WebRequest -Uri $Dep.LatestIni -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop).Content
+        $ver = [regex]::Match($ini, '(?m)^\s*version\s*=\s*([0-9]+(?:\.[0-9]+){1,3})\s*$')
+        $base = [regex]::Match($ini, '(?m)^\s*baseurl\s*=\s*(https://\S+/)\s*$')
+        if (-not $ver.Success -or -not $base.Success) { return $null }
+        $file = "TortoiseGit-$($ver.Groups[1].Value)-64bit.msi"
+        return @{ Url = "$($base.Groups[1].Value)$file"; File = $file; Tag = $ver.Groups[1].Value }
+    }
+    catch { return $null }
+}
+
 function Get-InstallRoute {
     <#
       How a dependency WOULD be installed, as one readable line, so -CheckOnly can
@@ -527,7 +630,8 @@ function Get-InstallRoute {
 
     if ($Dep.Script) { return "vendor script    $($Dep.Script)" }
     if ($Dep.Winget -and $HasWinget) { return "winget           $($Dep.Winget)" }
-    if ($Dep.LatestApi) { return "direct download  current release from $($Dep.LatestApi) (pinned fallback: $($Dep.File))" }
+    if ($Dep.Resolver -eq 'github') { return "direct download  current release from $($Dep.LatestApi) (pinned fallback: $($Dep.File))" }
+    if ($Dep.Resolver -eq 'tortoisegit') { return "direct download  current release from $($Dep.LatestIni) (pinned fallback: $($Dep.File))" }
     if ($Dep.Url) { return "direct download  $($Dep.Url)" }
     return 'NO ROUTE - this dependency cannot be installed on this host'
 }
@@ -571,8 +675,15 @@ function Install-Dependency {
     # a pin names one version and that version stops being current.
     $url = $Dep.Url
     $fileName = $Dep.File
-    if ($Dep.LatestApi) {
-        $latest = Resolve-LatestAsset $Dep
+    # ONE dispatch point, and each vendor's resolver is its own function. A single
+    # resolver that knew about every vendor would grow a branch per row.
+    if ($Dep.Resolver) {
+        $latest = $null
+        switch ($Dep.Resolver) {
+            'github'      { $latest = Resolve-LatestAsset $Dep }
+            'tortoisegit' { $latest = Resolve-TortoiseGitAsset $Dep }
+            default       { Write-Host "   unknown resolver '$($Dep.Resolver)' - using the pin" -ForegroundColor Yellow }
+        }
         if ($latest) {
             Write-Host "   current release: $($latest.Tag) -> $($latest.File)" -ForegroundColor Green
             $url = $latest.Url
@@ -683,6 +794,46 @@ function Invoke-SelfTest {
     # vanishes on the way to the PowerShell 7 child, a string does not.
     $cw = Get-ForwardArgs @{ Cowork = 'no' }
     Check 'cowork: -Cowork no survives the relaunch' (($cw.Count -eq 2) -and ($cw[0] -eq '-Cowork') -and ($cw[1] -eq 'no'))
+
+    # THE TWO ROWS THAT DO NOT RESOLVE THROUGH PATH OR THROUGH GitHub.
+    $vscodeDep = $DEPS | Where-Object { $_.Name -eq 'vscode' }
+    $tgitDep   = $DEPS | Where-Object { $_.Name -eq 'tortoisegit' }
+    Check 'vscode is in the dependency table'      ([bool] $vscodeDep)
+    Check 'tortoisegit is in the dependency table' ([bool] $tgitDep)
+    # -user, not -system: the owner asked for the per-user install, and the two URLs
+    # differ by one word.
+    Check 'vscode downloads the USER installer'    ($vscodeDep.Url -like '*win32-x64-user*')
+    Check 'vscode keeps code out of the foreground and puts it on PATH' `
+          (($vscodeDep.Args -join ' ') -match '!runcode' -and ($vscodeDep.Args -join ' ') -match 'addtopath')
+    # The msiexec branch is chosen by the file EXTENSION alone, so these two names
+    # decide which installer runs.
+    Check 'vscode installs as an .exe'   ($vscodeDep.File -like '*.exe')
+    Check 'tortoisegit installs as .msi' ($tgitDep.File -like '*.msi')
+    Check 'tortoisegit passes msiexec flags, not Inno flags' `
+          ((($tgitDep.Args -join ' ') -eq '/qn /norestart'))
+    # TortoiseGit puts nothing on PATH, so a row with an Exe would be probed the
+    # wrong way and read as missing for ever.
+    Check 'tortoisegit probes the registry, not PATH' `
+          ((-not $tgitDep.Exe) -and [bool] $tgitDep.RegKey -and [bool] $tgitDep.RegFile)
+
+    # THE REGISTRY PROBE, both halves. A key whose directory holds no executable is
+    # what an uninstall leaves behind, and it must read as ABSENT.
+    $fakeRoot = Join-Path $env:TEMP ('dep-probe-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $fakeRoot -Force | Out-Null
+    Check 'registry probe: real key + real file = present' (Test-DependencyPresent $tgitDep)
+    Check 'registry probe: a missing key is absent' `
+          (-not (Test-DependencyPresent @{ RegKey = 'HKLM:\SOFTWARE\NoSuchKeyX9'; RegValue = 'Directory'; RegFile = 'a.exe' }))
+    Check 'registry probe: key present, FILE absent = absent' `
+          (-not (Test-DependencyPresent @{ RegKey = $tgitDep.RegKey; RegValue = $tgitDep.RegValue; RegFile = 'bin\no-such-file-x9.exe' }))
+    Remove-Item $fakeRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+    # THE EXTENSION LIST. -contains, never -like: the lookalike is a real risk.
+    Check 'extension list names the Claude Code extension' ($VSCODE_EXTENSIONS -contains 'anthropic.claude-code')
+    $fakeList = @('anthropic.claude-code-extra', 'ms-python.python')
+    Check 'extension match: a LONGER id does NOT count as installed' `
+          (-not ($fakeList -contains 'anthropic.claude-code'))
+    Check 'extension match: the exact id does count' `
+          ((@('anthropic.claude-code') + $fakeList) -contains 'anthropic.claude-code')
 
     # THE PLUGIN TABLE. Three names per row that are NOT the same word, and the
     # whole phase breaks quietly if any row loses one.
@@ -998,9 +1149,13 @@ else {
 }
 
 foreach ($d in $DEPS) {
-    $found = Get-Command $d.Exe -ErrorAction SilentlyContinue
-    if ($found) { Write-Host ("   {0,-8} present  {1}" -f $d.Name, $found.Source) -ForegroundColor Green }
-    else { Write-Host ("   {0,-8} MISSING" -f $d.Name) -ForegroundColor Red }
+    if (Test-DependencyPresent $d) {
+        # Say WHERE, when there is a where to say. TortoiseGit has no PATH entry, so
+        # its evidence is the registry key, not a resolved command.
+        $where = if ($d.Exe) { (Get-Command $d.Exe -ErrorAction SilentlyContinue).Source } else { $d.RegKey }
+        Write-Host ("   {0,-12} present  {1}" -f $d.Name, $where) -ForegroundColor Green
+    }
+    else { Write-Host ("   {0,-12} MISSING" -f $d.Name) -ForegroundColor Red }
 }
 # npm is reported but never installed: it arrives with node.
 $npmFound = Get-Command npm -ErrorAction SilentlyContinue
@@ -1055,9 +1210,10 @@ if ($missing.Count -gt 0) {
         Write-Host ""
         Write-Host "   re-checking after install:"
         foreach ($d in $DEPS) {
-            $found = Get-Command $d.Exe -ErrorAction SilentlyContinue
-            if ($found) { Write-Host ("   {0,-8} OK" -f $d.Name) -ForegroundColor Green }
-            else { Write-Host ("   {0,-8} STILL MISSING" -f $d.Name) -ForegroundColor Red }
+            # Test-DependencyPresent, not Get-Command: a row with no PATH entry would
+            # read as STILL MISSING right after installing perfectly well.
+            if (Test-DependencyPresent $d) { Write-Host ("   {0,-12} OK" -f $d.Name) -ForegroundColor Green }
+            else { Write-Host ("   {0,-12} STILL MISSING" -f $d.Name) -ForegroundColor Red }
         }
         $still = Get-MissingDependency $DEPS
         if ($still.Count -gt 0) {
@@ -1066,6 +1222,58 @@ if ($missing.Count -gt 0) {
             Write-Host "   If they did install, close this terminal and run the script again" -ForegroundColor Red
             Write-Host "   so PATH is rebuilt from scratch." -ForegroundColor Red
             Stop-Run 1
+        }
+    }
+}
+
+# ------------------------------------------------- phase 2b: VS Code extensions
+# HERE, and not earlier, because it needs `code` to exist - the toolchain phase
+# above has just installed VS Code and rebuilt PATH from the Machine AND User
+# hives, which is where the user installer writes its entry.
+#
+# Nothing else in this script depends on the editor, so a failure here is reported
+# and the run continues: an agent's extension missing is not a reason to leave a
+# workstation half-configured.
+Write-Phase "VS Code extensions"
+$codeCmd = (Get-Command code -ErrorAction SilentlyContinue).Source
+if (-not $codeCmd) {
+    # The user installer's own location, in case the addtopath task did not take.
+    # Named rather than guessed: measured 2026-10-07 on this host.
+    $probe = Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\bin\code.cmd'
+    if (Test-Path -LiteralPath $probe) { $codeCmd = $probe }
+}
+if (-not $codeCmd) {
+    Write-Host "   VS Code's `code` command is not available - skipping." -ForegroundColor Yellow
+    Write-Host "   Open a new terminal and run:  code --install-extension $($VSCODE_EXTENSIONS -join ' ')"
+}
+else {
+    Write-Host "   using $codeCmd"
+    # ONE call, read ONCE. `code --list-extensions` takes seconds, and asking it per
+    # extension would pay that per row for an answer that cannot change mid-phase.
+    $installed = @()
+    $listed = & $codeCmd --list-extensions 2>&1
+    if ($LASTEXITCODE -eq 0) { $installed = @($listed | ForEach-Object { "$_".Trim() }) }
+    else { Write-Host "   could not list extensions (exit $LASTEXITCODE) - treating all as missing" -ForegroundColor Yellow }
+
+    foreach ($ext in $VSCODE_EXTENSIONS) {
+        # -contains is an EXACT match on purpose. -like 'anthropic.claude-code*'
+        # would also accept anthropic.claude-code-extra, which is a different
+        # extension. Verified 2026-10-07 against the live list.
+        if ($installed -contains $ext) {
+            Write-Host "   $ext already installed - left alone" -ForegroundColor Green
+            continue
+        }
+        if ($CheckOnly) {
+            Write-Host "   would run: code --install-extension $ext" -ForegroundColor Yellow
+            continue
+        }
+        & $codeCmd --install-extension $ext 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "     $_" }
+        # Read the state back rather than trusting the installer's own text.
+        $after = @(& $codeCmd --list-extensions 2>&1 | ForEach-Object { "$_".Trim() })
+        if ($after -contains $ext) { Write-Host "   $ext installed" -ForegroundColor Green }
+        else {
+            $extFailed += $ext
+            Write-Host "   $ext did NOT install" -ForegroundColor Red
         }
     }
 }
@@ -1422,6 +1630,11 @@ else {
         Write-Host "     claude plugin install $($pl.Plugin)@$($pl.Market)"
         if ($pl.Deploy) { Write-Host "     python Tools\deploy.py --user --apply $($pl.Deploy)" }
     }
+}
+if ($extFailed.Count -gt 0) {
+    Write-Host ""
+    Write-Host "   These VS Code extensions did NOT install: $($extFailed -join ', ')" -ForegroundColor Red
+    foreach ($e in $extFailed) { Write-Host "     code --install-extension $e" }
 }
 Write-Host ""
 Write-Host "3. Verify what a session actually LOADS - no script can see this:"

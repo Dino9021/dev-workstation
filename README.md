@@ -54,11 +54,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 ### 安裝順序
 
 1. **PowerShell 7**——先裝它，然後整支腳本重新在它底下執行
-2. **工具鏈**——`git`、`node`、`python`、`claude`。**不需要 winget**：有 winget 而且它成功就用它，沒有或失敗就直接下載原廠安裝檔靜默安裝。`git` 還會先向 Git for Windows 的 release feed 問出當前版本，釘住的網址只是最後防線
-3. **指令檔**——`Tools/deploy.py` 放置使用者層級的兩份與專案層級的範本
-4. **圖譜伺服器**——`graph-servers/install.ps1` 裝兩台伺服器、註冊 MCP、掛 refresh hook 與 post-commit hook、建第一次索引、啟動背景監看服務
-5. **claude-mem**——跨 session 記憶，純本機
-6. **Claude Code 外掛**——`dispatch-guard`（本專案運作所依據的規則，以及強制執行它們的 hook）與 `mattpocock-skills`（TDD、除錯、code review、領域建模等 skills）
+2. **工具鏈**——依序檢查並只補缺的：**VS Code**（使用者版，裝在 `~\AppData\Local`，不需要系統管理員）、`git`、**TortoiseGit**、`node`、`python`、`claude`。**不需要 winget**：有 winget 而且它成功就用它，沒有或失敗就直接下載原廠安裝檔靜默安裝。`git` 與 `TortoiseGit` 都會先向各自專案的來源問出當前版本，釘住的網址只是最後防線
+3. **VS Code 擴充套件**——`anthropic.claude-code`（Claude Code extension），用 VS Code 自己的 `code --install-extension` 安裝
+4. **指令檔**——`Tools/deploy.py` 放置使用者層級的兩份與專案層級的範本
+5. **圖譜伺服器**——`graph-servers/install.ps1` 裝兩台伺服器、註冊 MCP、掛 refresh hook 與 post-commit hook、建第一次索引、啟動背景監看服務
+6. **claude-mem**——跨 session 記憶，純本機
+7. **Claude Code 外掛**——`dispatch-guard`（本專案運作所依據的規則，以及強制執行它們的 hook）與 `mattpocock-skills`（TDD、除錯、code review、領域建模等 skills）
 
 ⚠ `dispatch-guard` 會伸手到這個專案以外：它會為整台機器裝一條狀態列和一個背景額度監看工作。2026-10-06 起它是預設安裝（原本藏在 `-All` 後面，該參數已取消）。
 
@@ -239,17 +240,21 @@ to it.
 ### The order it installs in
 
 1. **PowerShell 7** — first, then the whole script relaunches under it
-2. **Toolchain** — `git`, `node`, `python`, `claude`. **winget is not required.** It is
+2. **Toolchain** — checked first and installed only when missing, in this order:
+   **VS Code** (the per-user install, under `~\AppData\Local`, no administrator needed),
+   `git`, **TortoiseGit**, `node`, `python`, `claude`. **winget is not required.** It is
    used when it is present *and succeeds*; otherwise the vendor's own installer is
-   downloaded and run silently. `git` asks the Git for Windows release feed for the
-   current version first, so the pinned URL is only the last resort
-3. **Instruction files** — `Tools/deploy.py` places the user-scope pair and the project
+   downloaded and run silently. `git` and `TortoiseGit` each ask their own project for the
+   current version first, so the pinned URLs are only the last resort
+3. **VS Code extensions** — `anthropic.claude-code`, installed through VS Code's own
+   `code --install-extension`
+4. **Instruction files** — `Tools/deploy.py` places the user-scope pair and the project
    template
-4. **Graph servers** — `graph-servers/install.ps1` installs both servers, registers the MCP
+5. **Graph servers** — `graph-servers/install.ps1` installs both servers, registers the MCP
    entries, wires the refresh and post-commit hooks, builds the first index and starts the
    watch daemon
-5. **claude-mem** — cross-session memory, local only
-6. **Claude Code plugins** — `dispatch-guard` (the rules this repository runs on and the
+6. **claude-mem** — cross-session memory, local only
+7. **Claude Code plugins** — `dispatch-guard` (the rules this repository runs on and the
    hook that enforces them) and `mattpocock-skills` (skills: TDD, diagnosing bugs, code
    review, domain modelling)
 

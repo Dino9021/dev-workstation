@@ -108,12 +108,14 @@ A fix not in the trunk is invisibly absent from every other branch's build.
   shape.
 - **Required dependency: the `dispatch-guard` plugin**
   (`https://github.com/Dino9021/dispatch-guard.git`). Its hook enforces the rules above —
-  without it they are advice. **Invoke `dispatch-guard:unattended-work` before any task
-  longer than a few steps, and `dispatch-guard:dispatch-protocol` before dispatching or
-  opening a task folder.** Not invoking them is the same as not having their rules. A
-  refused dispatch is the rule working, not a bug.
-- **If a skill's confirmation line did not print at session start, read its `SKILL.md`
-  under `~/.claude/plugins/marketplaces/dispatch-guard/skills/` and follow it anyway.**
+  without it they are advice. **Invoke `dispatch-guard:unattended-work` when the request
+  says 無人職守, 無人值守, 無人模式, 自動模式, 做完再叫我 or unattended, and
+  `dispatch-guard:dispatch-protocol` before dispatching or opening a task folder.** Not
+  invoking them is the same as not having their rules. A refused dispatch is the rule
+  working, not a bug.
+- **If you invoked a dispatch-guard skill and no `⭐ <skill> ACTIVE` notice from
+  dispatch-guard followed, read its `SKILL.md` under
+  `~/.claude/plugins/marketplaces/dispatch-guard/skills/` and follow it anyway.**
   Edits to the skills go to the upstream repository and arrive by plugin update — an edit
   made to the installed copy is silently overwritten by the next update.
 - Before a dispatch wave, get the usage verdict (the plugin's `usage.py --verdict`) and act
