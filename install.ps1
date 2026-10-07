@@ -264,6 +264,19 @@ function Test-DependencyPresent {
       that is not python at all - see the python row for the measurement.
     #>
     param($Dep)
+    # ⛔ pwsh IS ANSWERED BY Get-Pwsh7Path AND NOTHING ELSE, so the gate, phase 1 and phase
+    # 2 cannot disagree - which is what three comments in this file already claimed before
+    # it was true. Bare Get-Command is wrong for this row in BOTH directions: PowerShell 6
+    # is also called pwsh, and a PowerShell 7 installed without ADD_PATH is not on PATH at
+    # all. The second direction became reachable the moment the administrator gate started
+    # calling Update-PathFromRegistry at the top of every run: that replaces the inherited
+    # PATH with Machine;User from the registry, and a pwsh 7 child puts its own $PSHOME on
+    # PATH at startup - an entry the rebuild throws away. Measured on this host by stripping
+    # the PowerShell\7 entry from the rebuilt value: Get-Command pwsh NOT FOUND,
+    # Test-DependencyPresent False, Get-Pwsh7Path C:\Program Files\PowerShell\7\pwsh.exe.
+    # Phase 2 would then have reinstalled PowerShell 7 on a machine running it - and told a
+    # standard user they need an administrator for a tool they already have.
+    if ($Dep.Name -eq 'pwsh') { return [bool] (Get-Pwsh7Path) }
     if ($Dep.RegKey) {
         # Test-Path FIRST, and not merely for tidiness. The per-call -ErrorAction
         # Stop that used to sit in the try below made a missing key a TERMINATING
@@ -1503,6 +1516,30 @@ function Invoke-SelfTest {
     # must count as 1 and not as the hashtable's key count.
     $one = Select-AdminBlocker $fakeDeps @($fakeAdmin) $true $false
     Check 'gate: ONE blocking row counts as 1, not as its key count' (@($one).Count -eq 1)
+
+    # ⛔ ONE TEST FOR pwsh, EVERYWHERE. The administrator gate calls
+    # Update-PathFromRegistry at the top of every run, including inside the PowerShell 7
+    # child - and that replaces the inherited PATH with Machine;User from the registry,
+    # throwing away the $PSHOME entry a pwsh 7 child adds for itself at startup. On a host
+    # where PowerShell 7 was installed without ADD_PATH there is then nothing called pwsh
+    # on PATH, and a bare Get-Command would have reported the shell currently executing
+    # this script as MISSING. Process-local, and restored in the finally.
+    $pwshRow = $DEPS | Where-Object { $_.Name -eq 'pwsh' }
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = (($env:PATH -split ';') | Where-Object { $_ -and ($_ -notmatch 'PowerShell\\7') }) -join ';'
+        $onPath = [bool] (Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue)
+        $found = [bool] (Get-Pwsh7Path)
+        if ($found -and (-not $onPath)) {
+            # The host this case exists for. Say so, so a PASS here means the divergence was
+            # actually exercised rather than never reached.
+            Check 'pwsh: still PRESENT with no pwsh on PATH (the divergence was exercised)' ((Test-DependencyPresent $pwshRow) -eq $true)
+        }
+        else {
+            Check 'pwsh: presence agrees with Get-Pwsh7Path (this host cannot reach the divergence)' ((Test-DependencyPresent $pwshRow) -eq $found)
+        }
+    }
+    finally { $env:PATH = $savedPath }
 
     # ---------------------------------------------- the pwsh row, BOTH directions
     # ⛔ THE REGRESSION CASE, and the one the first version of this gate failed. The
