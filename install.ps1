@@ -166,14 +166,20 @@ function Get-InstallExitHint {
         # and SERVICE, and to nobody else.
         1601 { return 'the Windows Installer service could not be reached - this usually means administrator rights are needed' }
         1625 { return 'system policy forbids this installation - administrator rights, or a policy change, are needed' }
-        1925 { return 'this package needs administrator rights to install for all users' }
         1603 { return 'the installer failed part-way; its own log has the reason, and insufficient rights is a common one' }
-        # Burn bundles (the VC++ runtime, python) answer this when they need to raise
-        # an elevation prompt and there is no interactive desktop to raise it on.
-        1459 { return 'the installer needed an interactive desktop to ask for elevation and had none - run it from a signed-in session, elevated' }
-        5    { return 'access denied - administrator rights are needed' }
+        # Burn bundles (the VC++ runtime, python) answer this when they want to raise an
+        # elevation prompt and there is no interactive desktop to raise it on.
+        # ⚠ IT DOES NOT SAY "ELEVATED", DELIBERATELY. This script's own python row argues
+        # that a standard user signed in at the machine already holds the rights that a
+        # remote, non-interactive session lacks; telling them to elevate as well would be
+        # the one hint that sends somebody for rights they may not need.
+        1459 { return 'the installer wanted an interactive desktop to ask about elevation and had none - run it from a session signed in at the machine' }
+        # Deliberately NOT 1925. That is an MSI Error-table code ("you must be an
+        # administrator to install this product for all users"), raised INSIDE a
+        # transaction - it is not a process exit code, so a row here could never fire.
+        5    { return 'access denied - the installer could not write somewhere it needed to, commonly because administrator rights are missing' }
         740  { return 'this installer refuses to run without elevation' }
-        1223 { return 'the elevation prompt was cancelled' }
+        1223 { return 'an elevation prompt was cancelled' }
         default { return '' }
     }
 }
@@ -348,10 +354,30 @@ function Select-AdminBlocker {
       counted 1 when nothing was blocking would stop every run on earth. Without the
       comma, @() around the call gives 0, 1 and n correctly - which is why the
       self-test drives this function the same way the gate does.
+
+      ⛔ AND IT RECONCILES THE pwsh ROW IN BOTH DIRECTIONS - the first version did only
+      one, and that was a REGRESSION rather than a missing nicety.
+      Test-DependencyPresent judges pwsh with a bare Get-Command; phase 1 judges it with
+      Get-Pwsh7Path, which ALSO accepts a PowerShell 7 that is in Program Files but not
+      on PATH. Adding the row when Get-Pwsh7Path found nothing, without REMOVING it when
+      Get-Pwsh7Path did find it, made the gate stop on a host that already had
+      PowerShell 7 and tell its user to go and install PowerShell 7. Such a host used to
+      relaunch through exactly that fallback and finish. Measured, and found by review
+      and not by the tests - which is why both directions now have a case of their own.
+
+      $Pwsh7Found and $Elevated are passed IN, not probed here. That is what keeps this
+      function pure, and it is the only reason every branch above can be driven offline.
     #>
-    param($Missing, [bool] $Elevated)
+    param($Deps, $Missing, [bool] $Pwsh7Found, [bool] $Elevated)
     if ($Elevated) { return @() }
-    return @($Missing | Where-Object { $_.NeedsAdmin })
+    $rows = @($Missing)
+    if ($Pwsh7Found) {
+        $rows = @($rows | Where-Object { $_.Name -ne 'pwsh' })
+    }
+    elseif (@($rows | Where-Object { $_.Name -eq 'pwsh' }).Count -eq 0) {
+        $rows = @($Deps | Where-Object { $_.Name -eq 'pwsh' }) + $rows
+    }
+    return @($rows | Where-Object { $_.NeedsAdmin })
 }
 
 function Update-PathFromRegistry {
@@ -1441,11 +1467,15 @@ function Invoke-SelfTest {
     # ---------------------------------------------- the administrator gate
     # Rows made up here, never $DEPS, so these cases keep saying what they mean after
     # the table changes. The $DEPS membership is asserted separately, below.
+    # $true for $Pwsh7Found in the cases that are not about pwsh, so the row is simply
+    # not in play; the pwsh reconciliation has its own four cases further down.
     $fakeAdmin = @{ Name = 'needs-admin'; NeedsAdmin = $true }
     $fakeUser  = @{ Name = 'user-scope' }
     $fakeUser2 = @{ Name = 'user-scope-2' }
+    $fakePwsh  = @{ Name = 'pwsh'; NeedsAdmin = $true }
+    $fakeDeps  = @($fakePwsh, $fakeAdmin, $fakeUser, $fakeUser2)
 
-    $elev = @(Select-AdminBlocker @($fakeAdmin, $fakeUser) $true)
+    $elev = @(Select-AdminBlocker $fakeDeps @($fakeAdmin, $fakeUser) $true $true)
     Check 'gate: an ELEVATED run is never blocked, even by an admin-only row' ($elev.Count -eq 0)
 
     # ⛔ THE LOOKALIKE, and the case most worth having. A standard user whose missing
@@ -1454,20 +1484,46 @@ function Invoke-SelfTest {
     # rights nobody needs. Measured on a clean Windows 11, git and VS Code both
     # install for a standard user with exit 0 - so this is a real shape, not a
     # hypothetical one.
-    $lookalike = @(Select-AdminBlocker @($fakeUser, $fakeUser2) $false)
+    $lookalike = @(Select-AdminBlocker $fakeDeps @($fakeUser, $fakeUser2) $true $false)
     Check 'gate: a NON-elevated run with only user-scope rows missing is NOT blocked' ($lookalike.Count -eq 0)
 
-    $blocked = @(Select-AdminBlocker @($fakeUser, $fakeAdmin, $fakeUser2) $false)
+    $blocked = @(Select-AdminBlocker $fakeDeps @($fakeUser, $fakeAdmin, $fakeUser2) $true $false)
     Check 'gate: a non-elevated run IS blocked by an admin-only missing row' ($blocked.Count -eq 1)
     Check 'gate: and it names exactly that row' ($blocked[0].Name -eq 'needs-admin')
 
-    $none = @(Select-AdminBlocker @() $false)
+    $none = @(Select-AdminBlocker $fakeDeps @() $true $false)
     Check 'gate: nothing missing, nothing blocked' ($none.Count -eq 0)
 
     # The single-element unroll trap: read back the way the gate reads it, ONE row
     # must count as 1 and not as the hashtable's key count.
-    $one = Select-AdminBlocker @($fakeAdmin) $false
+    $one = Select-AdminBlocker $fakeDeps @($fakeAdmin) $true $false
     Check 'gate: ONE blocking row counts as 1, not as its key count' (@($one).Count -eq 1)
+
+    # ---------------------------------------------- the pwsh row, BOTH directions
+    # ⛔ THE REGRESSION CASE, and the one the first version of this gate failed. The
+    # missing-set says pwsh is missing, because Test-DependencyPresent asks Get-Command
+    # and PowerShell 7 is not on PATH - but Get-Pwsh7Path FOUND it in Program Files, so
+    # phase 1 will relaunch into it quite happily. The gate must not stop that host and
+    # tell its user to install what is already there.
+    $pwshOnDisk = @(Select-AdminBlocker $fakeDeps @($fakePwsh, $fakeUser) $true $false)
+    Check 'gate: pwsh 7 found on disk but off PATH is NOT a blocker' ($pwshOnDisk.Count -eq 0)
+
+    # The other direction: Get-Command resolved something called pwsh - PowerShell 6 is
+    # also called pwsh - so the missing-set says it is present, while Get-Pwsh7Path, which
+    # filters on major version 7, found nothing. Phase 1 WILL try to install it.
+    $pwsh6 = @(Select-AdminBlocker $fakeDeps @($fakeUser) $false $false)
+    Check 'gate: pwsh absent from the missing set but no PowerShell 7 IS a blocker' ($pwsh6.Count -eq 1)
+    Check 'gate: and that blocker is pwsh' ($pwsh6[0].Name -eq 'pwsh')
+
+    # Both agree it is missing: named once, never twice.
+    $pwshBoth = @(Select-AdminBlocker $fakeDeps @($fakePwsh, $fakeAdmin) $false $false)
+    Check 'gate: pwsh missing by both tests is listed ONCE' (@($pwshBoth | Where-Object { $_.Name -eq 'pwsh' }).Count -eq 1)
+    Check 'gate: and the other blocker is still there' (@($pwshBoth | Where-Object { $_.Name -eq 'needs-admin' }).Count -eq 1)
+
+    # An elevated run is short-circuited before any of that, so a disagreement about
+    # pwsh can never produce a blocker for an administrator.
+    $pwshElev = @(Select-AdminBlocker $fakeDeps @($fakeUser) $false $true)
+    Check 'gate: the pwsh reconciliation never blocks an ELEVATED run' ($pwshElev.Count -eq 0)
 
     # ⛔ AND THE OPPOSITE TRAP, which is the one that actually bit. `return ,@()` -
     # the comma idiom used two functions above - survives @() as a ONE-element array
@@ -1475,8 +1531,8 @@ function Invoke-SelfTest {
     # machine where nothing at all is missing. These two cases are a pair: neither
     # catches the other, and the first three attempts passed the one above while
     # failing this one.
-    $emptyBoth = (@(Select-AdminBlocker @($fakeAdmin) $true).Count -eq 0) -and
-                 (@(Select-AdminBlocker @() $false).Count -eq 0)
+    $emptyBoth = (@(Select-AdminBlocker $fakeDeps @($fakeAdmin) $true $true).Count -eq 0) -and
+                 (@(Select-AdminBlocker $fakeDeps @() $true $false).Count -eq 0)
     Check 'gate: an empty result is EMPTY after @(), not a list of one empty list' $emptyBoth
     # The same shape, stated against the real helper the gate feeds on, so a later
     # "tidy-up" that wraps it in @() fails here instead of in front of a user.
@@ -1690,22 +1746,18 @@ if (@($args | Where-Object { "$_" -match '^-+all$' }).Count -gt 0) {
 # to go and install git.
 if (-not $SkipDeps) {
     Update-PathFromRegistry
-    # ⚠ NOT @(Get-MissingDependency $DEPS). That helper returns `,$missing`, and the
-    # comma that saves a ONE-row result from unrolling turns an EMPTY one into a
-    # one-element array holding an empty array the moment @() is wrapped round it -
-    # measured. On a fully installed machine the gate would then be reasoning about a
-    # list of one thing that is not a dependency. Assigned plainly, as phase 2 does
-    # it, the count is right at 0, 1 and n.
+    # ⛔ NEVER @(Get-MissingDependency $DEPS). That helper returns `,$missing`, and the
+    # comma that saves a ONE-row result from unrolling collapses the WHOLE thing to a
+    # single element the moment @() is wrapped round it: measured, @() around that call
+    # gives Count 1 at every size - 0 rows, 1 row, 3 rows, all 1 - so the gate would be
+    # reasoning about one object that is not a dependency. Assigned plainly, as phase 2
+    # does it, the count is right at 0, 1 and n.
     $gateMissing = Get-MissingDependency $DEPS
-    # pwsh is the one row this script does not judge with Test-DependencyPresent:
-    # phase 1 uses a stricter test, because PowerShell 6 is also called pwsh. A gate
-    # that disagreed with phase 1 would wave the user through to the exact failure it
-    # exists to prevent.
-    if ((-not (Get-Pwsh7Path)) -and (@($gateMissing | Where-Object { $_.Name -eq 'pwsh' }).Count -eq 0)) {
-        $gateMissing = @($DEPS | Where-Object { $_.Name -eq 'pwsh' }) + $gateMissing
-    }
-
-    $gateBlockers = @(Select-AdminBlocker $gateMissing (Test-IsElevated))
+    # pwsh is the one row Test-DependencyPresent cannot judge for this purpose - phase 1
+    # uses Get-Pwsh7Path, which is stricter in one direction (PowerShell 6 is also called
+    # pwsh) and looser in another (PowerShell 7 in Program Files but not on PATH). Both
+    # differences are reconciled inside Select-AdminBlocker, where a test can reach them.
+    $gateBlockers = @(Select-AdminBlocker $DEPS $gateMissing ([bool] (Get-Pwsh7Path)) (Test-IsElevated))
     if ($gateBlockers.Count -gt 0) {
         Write-Host ""
         Write-Host "STOP - this account cannot install everything that is missing." -ForegroundColor Red
