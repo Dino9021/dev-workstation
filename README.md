@@ -52,9 +52,15 @@ One command turns a bare Windows host into a working Claude Code development env
 | Microsoft Visual C++ Redistributable 2015–2022（x86） | 同上，放進 `SysWOW64` | https://aka.ms/vs/17/release/vc_redist.x86.exe |
 | TortoiseGit | 它是檔案總管的 shell extension，而 shell extension 就是一筆 `HKLM` 註冊，沒有「只裝給我自己」的版本 | https://download.tortoisegit.org/ |
 
-⚠ 上表第三欄刻意寫**來源**而不是釘住版本的完整檔案網址。腳本擋下來的時候，會把它這一版真正
-要下載的完整網址逐項印在畫面上——那份才是權威，因為它直接來自腳本裡的 `$DEPS` 表。這裡再抄一
-份釘住版本的網址，只會多出一個會過期而且沒人檢查的副本。
+⚠ 上表第三欄刻意寫**來源**而不是釘住版本的完整檔案網址。腳本擋下來的時候，會逐項印出一個
+**完整、可以直接下載**的網址，那是給管理員照著做最省事的一份。這裡再抄一份釘住版本的網址，
+只會多出一個會過期而且沒人檢查的副本。
+
+（但不要把腳本印的那一行讀成「這就是它等一下會抓的那個檔」。`git` 與 `TortoiseGit` 兩列會先向
+各自專案問出當前版本才下載，所以實際抓的網址可能版本不同，甚至主機都不同——2026-10-07 實測，
+TortoiseGit 的版本查詢回覆 `baseurl=https://updater.download.tortoisegit.org/...`，而印出來的是
+`download.tortoisegit.org`。兩個都通，而且這裡要的只是「那個工具最後有裝起來」，版本差一點不
+影響：下次執行會重新檢查。）
 
 這五項只需要請管理員裝**一次**。裝完之後，這支腳本就不會再擋你，其餘項目都可以用自己的一般
 帳戶安裝。
@@ -73,11 +79,14 @@ One command turns a bare Windows host into a working Claude Code development env
 *設計上就屬於使用者範圍，但還沒有在一般使用者帳戶上從頭跑完一次*：
 
 - **Python**——以 `InstallAllUsers=0` 安裝，整包都只裝給目前使用者。
-  ⚠ 目前唯一一次在一般使用者帳戶上的實測是**失敗的**（結束碼 1601），但那是測試環境的問題
-  而不是權限問題：測試是透過 SSH 進行的，而 SSH 的登入權杖沒有 `INTERACTIVE` 這個群組，
-  Windows Installer 服務的存取權限只開給系統管理員、`INTERACTIVE` 與服務帳戶三者。直接坐在
-  機器前面登入的一般使用者是屬於 `INTERACTIVE` 的，所以預期可以正常安裝。完整的推論與反證
-  過程在 `Memory/tasks/20261007-010000-non-admin-install/RESULT.md` 第 3 節
+  ⚠ 目前唯一一次在一般使用者帳戶上的實測是**失敗的**（結束碼 1601）。最合理的解釋是測試環境
+  而不是權限：測試透過 SSH 進行，而 SSH 的登入權杖沒有 `INTERACTIVE` 群組，Windows Installer
+  服務的存取權限只開給系統管理員、`INTERACTIVE` 與服務帳戶三者；直接坐在機器前面登入的一般
+  使用者是屬於 `INTERACTIVE` 的。**但這是推論，還沒有量到。** 沒有人在實際登入的桌面工作階段
+  上跑過一次，而且還有一個競爭解釋（那台主機的 DCOM 啟動限制被改過，內容沒人讀）尚未排除。
+  所以這一列目前沒有標成需要管理員；如果將來在桌面上測出來是失敗的，就要改。完整的推論、
+  控制組、反證與三個尚未補上的缺口都在
+  `Memory/tasks/20261007-010000-non-admin-install/RESULT.md` 第 3 節
 - **uv** 與 **claude**——原廠安裝指令碼，裝進 `~\.local\bin`
 - 其後所有階段：`Tools/deploy.py`、圖譜伺服器、claude-mem、Claude Code 外掛
 
@@ -306,10 +315,16 @@ write to none of those.
 | TortoiseGit | It is an Explorer shell extension, and a shell extension *is* an `HKLM` registration. There is no install-for-me-only form of it | https://download.tortoisegit.org/ |
 
 ⚠ That last column names a SOURCE and not a pinned file, deliberately. When the script
-stops it prints the full address it would itself have downloaded, for each tool it is
-waiting on, and that is the authoritative one because it comes straight out of the `$DEPS`
-table. A pinned URL copied in here would be a second copy that rots and that nothing
-checks.
+stops it prints, for each tool it is waiting on, one **complete address that can be
+downloaded directly** — which is the least work for the administrator doing it. A pinned
+URL copied in here would be a second copy that rots and that nothing checks.
+
+(Do not read the line it prints as "the exact file it would have fetched". The `git` and
+`TortoiseGit` rows ask their own projects for the current release first, so a real run may
+fetch a different version and even a different host — measured 2026-10-07, TortoiseGit's
+version feed answers `baseurl=https://updater.download.tortoisegit.org/...` while the
+printed address is on `download.tortoisegit.org`. Both work, and the difference does not
+matter here: the point is only that the tool ends up present, and the next run re-checks.)
 
 An administrator installs those five **once**. After that this script stops blocking you,
 and the rest installs from your own ordinary account.
@@ -333,13 +348,16 @@ not equally strong:
 *User-scope by design, but not yet run end to end from a standard user account*:
 
 - **Python** — installed with `InstallAllUsers=0`, so the whole package is yours alone.
-  ⚠ The one measurement from a standard user account **failed**, with exit code 1601 — and
-  that is the test environment rather than the privilege. The test ran over SSH, whose
-  logon token has no `INTERACTIVE` group, and access to the Windows Installer service on
-  that host is granted to administrators, `INTERACTIVE` and service accounts only. A
-  standard user signed in at the machine itself is in `INTERACTIVE` and is therefore
-  expected to install it. The working, including the control and the mutation that rule out
-  the alternatives, is in
+  ⚠ The one measurement from a standard user account **failed**, with exit code 1601. The
+  best explanation is the test environment rather than the privilege: the test ran over
+  SSH, whose logon token has no `INTERACTIVE` group, and access to the Windows Installer
+  service on that host is granted to administrators, `INTERACTIVE` and service accounts
+  only — and a standard user signed in at the machine itself is in `INTERACTIVE`.
+  **That is reasoning, not a measurement.** Nobody has run it from a signed-in desktop
+  session, and one competing explanation (custom DCOM launch restrictions on that host,
+  whose contents nobody read) is not ruled out. So the row is not marked as needing an
+  administrator; if a desktop measurement says otherwise, it changes. The working, its
+  control, its mutation and the three gaps still open are in
   `Memory/tasks/20261007-010000-non-admin-install/RESULT.md` section 3
 - **uv** and **claude** — vendor install scripts, into `~\.local\bin`
 - And every phase after the toolchain: `Tools/deploy.py`, the graph servers, claude-mem,
