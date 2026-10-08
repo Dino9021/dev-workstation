@@ -151,7 +151,31 @@ A 組只需要請管理員裝**一次**。裝完之後，這支腳本就不會�
 
 ### 第一次安裝
 
-**全新主機（什麼都還沒裝、連 `git` 都沒有）**——只下載 `install.ps1` 這一個檔案，直接執行：
+**全新主機（什麼都還沒裝、連 `git` 都沒有）**——開一個 **PowerShell 視窗**，貼上這一行就好：
+
+```powershell
+$u='https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1'; $f="$env:TEMP\install.ps1"; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest $u -OutFile $f -UseBasicParsing; powershell -ExecutionPolicy Bypass -File $f
+```
+
+有系統管理員帳號的話，用「以系統管理員身分執行」開 PowerShell 再貼同一行，就會走完整的全機器安裝。
+沒有的話照貼即可，腳本會問你要不要用可攜版（見下方「需要系統管理員的項目」）。
+
+常用變化：
+
+```powershell
+# 完全不互動：沒有權限時自動用可攜版，不裝 claude-mem Cowork
+... powershell -ExecutionPolicy Bypass -File $f -Portable yes -Cowork no
+
+# 先看它打算做什麼，什麼都不裝
+... powershell -ExecutionPolicy Bypass -File $f -CheckOnly
+```
+
+⛔ **不要用 `irm ... | iex`。** 這支腳本裝好 PowerShell 7 之後，會用 `-File $PSCommandPath`
+把自己重新啟動一次交棒過去；而管線進 `iex` 的腳本沒有自己的路徑——實測
+`$PSCommandPath` 與 `$PSScriptRoot` 兩個都是空字串，用 `-File` 執行才有值。所以它**必須**先
+落成一個檔案再執行，上面那一行就是在做這件事。
+
+分成兩行寫也完全一樣，只是比較好讀：
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1 -OutFile install.ps1 -UseBasicParsing
@@ -482,8 +506,34 @@ it.
 
 ### First install
 
-**A fresh host — nothing installed, not even `git`.** Download `install.ps1` on its own
-and run it:
+**A fresh host — nothing installed, not even `git`.** Open a **PowerShell window** and paste
+this one line:
+
+```powershell
+$u='https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1'; $f="$env:TEMP\install.ps1"; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest $u -OutFile $f -UseBasicParsing; powershell -ExecutionPolicy Bypass -File $f
+```
+
+If you have an administrator account, open PowerShell with "Run as administrator" first and
+paste the same line for the full per-machine install. If you do not, paste it as you are —
+the script will ask whether to use portable copies (see "What needs an administrator").
+
+The variants worth knowing:
+
+```powershell
+# Fully unattended: portable copies when there are no rights, no claude-mem Cowork
+... powershell -ExecutionPolicy Bypass -File $f -Portable yes -Cowork no
+
+# Report what it would do, and install nothing
+... powershell -ExecutionPolicy Bypass -File $f -CheckOnly
+```
+
+⛔ **Do not use `irm ... | iex`.** Once this script has installed PowerShell 7 it relaunches
+itself with `-File $PSCommandPath` to hand the run over — and a script piped into `iex` has
+no path of its own. Measured, with a positive control: through `iex` both `$PSCommandPath`
+and `$PSScriptRoot` are empty strings, and run with `-File` they are not. So it **must**
+land on disk before it runs, which is what that line does.
+
+The same thing on two lines, if you prefer to read it:
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1 -OutFile install.ps1 -UseBasicParsing
