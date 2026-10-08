@@ -392,7 +392,36 @@ function Select-AdminBlocker {
     elseif (@($rows | Where-Object { $_.Name -eq 'pwsh' }).Count -eq 0) {
         $rows = @($Deps | Where-Object { $_.Name -eq 'pwsh' }) + $rows
     }
-    return @($rows | Where-Object { $_.NeedsAdmin })
+    # ⭐ Optional rows are NOT blockers. Nothing else in this repository needs them, so a
+    # run that cannot install one leaves it out and carries on - Select-SkippableRow is the
+    # other half of this, and the two must stay disjoint or a row would be both skipped and
+    # stopped for.
+    return @($rows | Where-Object { $_.NeedsAdmin -and (-not $_.Optional) })
+}
+
+function Select-SkippableRow {
+    <#
+      Which MISSING rows does a run without administrator rights simply LEAVE OUT instead
+      of stopping for?
+
+      Owner, 2026-10-08: 非管理員的安裝可以直接跳過 TortoiseGit 與 VC++ ... 只要有
+      git for windows 就可以正常運作. Measured before it was taken as true: outside
+      README's own prose and install.ps1's $DEPS table, nothing in this repository mentions
+      TortoiseGit, vcredist or vcruntime at all - no script, no Python, no settings file -
+      so the two really are a GUI and that GUI's prerequisite, and nothing downstream
+      notices their absence.
+
+      ⛔ IT IS NOT "OPTIONAL IF IT FAILS". An ELEVATED run that cannot install one of these
+      still fails loudly, because there the failure means something is wrong rather than
+      that the rights are missing. Only the lack of rights earns the skip, and the run says
+      so at the end rather than leaving the user to notice.
+
+      PURE, same as Select-AdminBlocker, and disjoint from it by construction: that one
+      takes NeedsAdmin AND NOT Optional, this one takes NeedsAdmin AND Optional.
+    #>
+    param($Missing, [bool] $Elevated)
+    if ($Elevated) { return @() }
+    return @($Missing | Where-Object { $_.NeedsAdmin -and $_.Optional })
 }
 
 function Update-PathFromRegistry {
@@ -584,6 +613,14 @@ $script:coworkAsked = $false
 # named there rather than scrolling past in the middle of the run.
 $extFailed = @()
 
+# What this run actually DID to the toolchain, for the summary at the very end. The owner
+# asked for it on 2026-10-08: a run that leaves tools out must say which, and say that
+# leaving them out is fine - otherwise the person is left to notice on their own, which on
+# a 40-minute install means not noticing at all. Filled by phase 2; read by the report.
+$script:toolsInstalled = @()
+$script:toolsPresent = @()
+$script:toolsSkipped = @()
+
 function Start-RunLog {
     param([string] $Path)
     $dir = Split-Path $Path -Parent
@@ -731,7 +768,9 @@ $DEPS = @(
     # is satisfied by vcruntime140.dll under System32 / SysWOW64 and an HKLM key, and
     # the same account was measured unable to write either. A system runtime is
     # machine-wide by its nature; there is no per-user form of it to fall back to.
-    @{ Name = 'vcredist-x64'; Exe = $null; NeedsAdmin = $true;
+    # Optional: it is in this table ONLY as TortoiseGit's prerequisite, so it leaves when
+    # TortoiseGit does. See Select-SkippableRow.
+    @{ Name = 'vcredist-x64'; Exe = $null; NeedsAdmin = $true; Optional = $true;
        RegKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'; RegValue = 'Installed';
        RegFile = (Join-Path $env:windir 'System32\vcruntime140.dll');
        Url = 'https://aka.ms/vs/17/release/vc_redist.x64.exe';
@@ -739,7 +778,8 @@ $DEPS = @(
 
     # Same as vcredist-x64 above: 1459 from the bundle, and a destination (SysWOW64
     # plus a WOW6432Node key) that this account provably cannot write.
-    @{ Name = 'vcredist-x86'; Exe = $null; NeedsAdmin = $true;
+    # Optional, for the same reason as x64 above.
+    @{ Name = 'vcredist-x86'; Exe = $null; NeedsAdmin = $true; Optional = $true;
        RegKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86'; RegValue = 'Installed';
        RegFile = (Join-Path $env:windir 'SysWOW64\vcruntime140.dll');
        Url = 'https://aka.ms/vs/17/release/vc_redist.x86.exe';
@@ -758,7 +798,10 @@ $DEPS = @(
     # extension IS an HKLM registration, so there is no per-user form of this tool to
     # install instead. This is one of the two rows that keep a standard user from
     # finishing on their own.
-    @{ Name = 'tortoisegit'; Exe = $null; NeedsAdmin = $true;
+    # Optional (owner, 2026-10-08): a GUI, and git for Windows is what everything else in
+    # this repository actually uses. A run without the rights to install it leaves it out
+    # and reports that at the end, instead of refusing to set the machine up at all.
+    @{ Name = 'tortoisegit'; Exe = $null; NeedsAdmin = $true; Optional = $true;
        RegKey = 'HKLM:\SOFTWARE\TortoiseGit'; RegValue = 'Directory';
        RegFile = 'bin\TortoiseGitProc.exe';
        Resolver = 'tortoisegit';
@@ -1608,6 +1651,58 @@ function Invoke-SelfTest {
     $uniqueNames = @($depNames | Sort-Object -Unique)
     Check 'every dependency name appears exactly once' ($depNames.Count -eq $uniqueNames.Count)
 
+    # ------------------------------------- skipped rather than blocked for (owner, 2026-10-08)
+    $fakeOpt = @{ Name = 'optional-admin'; NeedsAdmin = $true; Optional = $true }
+    $fakeDeps2 = @($fakePwsh, $fakeAdmin, $fakeOpt, $fakeUser)
+
+    # ⛔ THE WHOLE POINT OF THE CHANGE: a row this account cannot install, that nothing else
+    # needs, must NOT stop the run.
+    $optBlock = @(Select-AdminBlocker -Deps $fakeDeps2 -Missing @($fakeOpt, $fakeUser) -Pwsh7Found $true -Elevated $false)
+    Check 'skip: an OPTIONAL administrator-only row is not a blocker' ($optBlock.Count -eq 0)
+    $optSkip = @(Select-SkippableRow @($fakeOpt, $fakeUser) $false)
+    Check 'skip: and it IS in the skip list' (($optSkip.Count -eq 1) -and ($optSkip[0].Name -eq 'optional-admin'))
+
+    # The lookalike that must still STOP. Dropping TortoiseGit does not make pwsh optional.
+    $reqBlock = @(Select-AdminBlocker -Deps $fakeDeps2 -Missing @($fakeOpt, $fakeAdmin) -Pwsh7Found $true -Elevated $false)
+    Check 'skip: a REQUIRED administrator-only row still blocks, beside an optional one' (($reqBlock.Count -eq 1) -and ($reqBlock[0].Name -eq 'needs-admin'))
+
+    # Disjoint by construction, and asserted, because a row in both lists would be skipped
+    # AND stopped for - the run would refuse to start over something it had decided to
+    # leave out.
+    $bothMissing = @($fakeOpt, $fakeAdmin, $fakePwsh, $fakeUser)
+    $bNames = @(Select-AdminBlocker -Deps $fakeDeps2 -Missing $bothMissing -Pwsh7Found $true -Elevated $false | ForEach-Object { $_.Name })
+    $sNames = @(Select-SkippableRow $bothMissing $false | ForEach-Object { $_.Name })
+    Check 'skip: the blocked and skipped sets never share a row' (@($bNames | Where-Object { $sNames -contains $_ }).Count -eq 0)
+
+    # ⛔ Stated directly as well, because this is the direction that fails SILENTLY. A skip
+    # list that swallowed pwsh or node would leave them out with a reassuring note and the
+    # run would die much later, in a phase that cannot say why.
+    Check 'skip: a REQUIRED administrator-only row is NEVER in the skip list' (($sNames -notcontains 'needs-admin') -and ($sNames -notcontains 'pwsh'))
+
+    # An ELEVATED run skips nothing: there the rights are not the problem, so a failure
+    # means something is actually wrong and must still be loud.
+    Check 'skip: an ELEVATED run skips nothing' (@(Select-SkippableRow $bothMissing $true).Count -eq 0)
+
+    # Exactly which rows, by name - the same shape as the NeedsAdmin assertion, so adding a
+    # row to this set is a decision somebody has to make on purpose.
+    $optNames = (@($DEPS | Where-Object { $_.Optional } | ForEach-Object { $_.Name }) | Sort-Object) -join ','
+    $expectOpt = (@('tortoisegit', 'vcredist-x64', 'vcredist-x86') | Sort-Object) -join ','
+    Check "skip: Optional is exactly {$expectOpt}" ($optNames -eq $expectOpt)
+    # pwsh and node are NOT optional, and that is the measured reason: graph-servers'
+    # install.ps1 refuses to run under anything below PowerShell 7, and GitNexus and
+    # claude-mem are installed through npm and npx.
+    foreach ($n in @('pwsh', 'node')) {
+        $row = $DEPS | Where-Object { $_.Name -eq $n }
+        Check "skip: $n is NOT optional - the rest of the pipeline needs it" ((@($row).Count -eq 1) -and (-not $row.Optional))
+    }
+    # Optional only ever modifies an administrator-only row; on any other it would mean
+    # nothing and would quietly look like it meant something.
+    $optNotAdmin = @($DEPS | Where-Object { $_.Optional -and (-not $_.NeedsAdmin) })
+    Check 'skip: every Optional row is also NeedsAdmin' ($optNotAdmin.Count -eq 0)
+    # The end-of-run summary prints an address for each skipped row.
+    $optNoUrl = @($DEPS | Where-Object { $_.Optional -and (-not $_.Url) })
+    Check 'skip: every Optional row has a URL for the summary to print' ($optNoUrl.Count -eq 0)
+
     # ---------------------------------------------- the exit-code hints
     Check 'hint: 1601 says administrator' ((Get-InstallExitHint 1601) -match 'administrator')
     Check 'hint: 5 says administrator' ((Get-InstallExitHint 5) -match 'administrator')
@@ -2085,6 +2180,7 @@ foreach ($d in $DEPS) {
         # its evidence is the registry key, not a resolved command.
         $where = if ($d.Exe) { (Get-Command $d.Exe -ErrorAction SilentlyContinue).Source } else { $d.RegKey }
         Write-Host ("   {0,-12} present  {1}" -f $d.Name, $where) -ForegroundColor Green
+        $script:toolsPresent += $d.Name
     }
     else { Write-Host ("   {0,-12} MISSING" -f $d.Name) -ForegroundColor Red }
 }
@@ -2097,12 +2193,28 @@ $missing = Get-MissingDependency $DEPS
 if ($missing.Count -gt 0) {
     $names = ($missing | ForEach-Object { $_.Name }) -join ', '
     if ($CheckOnly) {
+        # The person most likely to run -CheckOnly is the one who suspects they do not have
+        # the rights, so it has to answer "and what will you leave out?" before they commit
+        # to a forty-minute run - not only "what will you install?".
+        $ckSkip = @(Select-SkippableRow $missing (Test-IsElevated))
+        $ckSkipNames = @($ckSkip | ForEach-Object { $_.Name })
+        $ckInstall = @($missing | Where-Object { $ckSkipNames -notcontains $_.Name })
         Write-Host ""
-        Write-Host "   would install: $names" -ForegroundColor Yellow
-        # WHICH ROUTE, not just which tool. "It downloads these, from here" is the
-        # thing somebody staring at a bare server needs before they commit to a run.
-        foreach ($d in $missing) {
-            Write-Host ("     {0,-8} {1}" -f $d.Name, (Get-InstallRoute $d))
+        if ($ckInstall.Count -gt 0) {
+            Write-Host "   would install: $(($ckInstall | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Yellow
+            # WHICH ROUTE, not just which tool. "It downloads these, from here" is the
+            # thing somebody staring at a bare server needs before they commit to a run.
+            foreach ($d in $ckInstall) {
+                Write-Host ("     {0,-8} {1}" -f $d.Name, (Get-InstallRoute $d))
+            }
+        }
+        if ($ckSkip.Count -gt 0) {
+            Write-Host ""
+            Write-Host "   would SKIP, because this account cannot install them and nothing else" -ForegroundColor Yellow
+            Write-Host "   here needs them - the run would carry on without them:" -ForegroundColor Yellow
+            foreach ($d in $ckSkip) {
+                Write-Host ("     {0,-8} {1}" -f $d.Name, $d.Url) -ForegroundColor Yellow
+            }
         }
         # STOP HERE, and this is not tidiness. A real run installs these in THIS
         # phase, BEFORE the prerequisite gate in preflight A ever sees them - so
@@ -2129,7 +2241,20 @@ if ($missing.Count -gt 0) {
         Stop-Run 1
     }
     else {
+        # Rows this account cannot install AND that nothing else here needs. The gate above
+        # has already let the run through on their account; this is where they are actually
+        # left out, and $script:toolsSkipped is what the report at the end reads.
+        $skip = @(Select-SkippableRow $missing (Test-IsElevated))
+        $script:toolsSkipped = $skip
+        if ($skip.Count -gt 0) {
+            Write-Host ""
+            Write-Host "   SKIPPING, because this account cannot install them and nothing else here" -ForegroundColor Yellow
+            Write-Host "   needs them: $(($skip | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Yellow
+            Write-Host "   The run continues. There is a summary at the end." -ForegroundColor Yellow
+        }
+        $skipNames = @($skip | ForEach-Object { $_.Name })
         foreach ($d in $missing) {
+            if ($skipNames -contains $d.Name) { continue }
             Write-Host ""
             Write-Host "   installing $($d.Name)" -ForegroundColor Cyan
             Write-Host "     via $(Get-InstallRoute $d)"
@@ -2137,6 +2262,7 @@ if ($missing.Count -gt 0) {
             # A vendor installer that places a binary and leaves the PATH to a human
             # is a tool this script installed and cannot reach. See the claude row.
             if ($d.PathAdd) { Add-UserPathEntry (Join-Path $env:USERPROFILE $d.PathAdd) }
+            $script:toolsInstalled += $d.Name
         }
         Update-PathFromRegistry
         Write-Host ""
@@ -2145,9 +2271,12 @@ if ($missing.Count -gt 0) {
             # Test-DependencyPresent, not Get-Command: a row with no PATH entry would
             # read as STILL MISSING right after installing perfectly well.
             if (Test-DependencyPresent $d) { Write-Host ("   {0,-12} OK" -f $d.Name) -ForegroundColor Green }
+            elseif ($skipNames -contains $d.Name) { Write-Host ("   {0,-12} skipped - needs an administrator" -f $d.Name) -ForegroundColor Yellow }
             else { Write-Host ("   {0,-12} STILL MISSING" -f $d.Name) -ForegroundColor Red }
         }
-        $still = Get-MissingDependency $DEPS
+        # A deliberately skipped row is not a failure, so it must not stop the run here -
+        # but EVERYTHING ELSE still must, exactly as before.
+        $still = @(Get-MissingDependency $DEPS | Where-Object { $skipNames -notcontains $_.Name })
         if ($still.Count -gt 0) {
             Write-Host ""
             Write-Host "   still missing: $(($still | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Red
@@ -2577,5 +2706,40 @@ if (-not $Pdg) {
     Write-Host "4. Taint analysis (explain) and pdg_query need the --pdg index, which was"
     Write-Host "   NOT built. It is a full second indexing pass:"
     Write-Host "     pwsh -File graph-servers\install.ps1 -Repo $Repo -Pdg"
+}
+
+# ------------------------------------------------------- the toolchain summary
+# ⭐ LAST THING ON THE SCREEN, and it is here rather than in phase 2 on purpose (owner,
+# 2026-10-08). Phase 2 happens in the first few minutes of a run that takes forty, so
+# anything it says has scrolled past half a dozen third-party installers by the time the
+# run ends. What a person needs to read when it finishes is: what have I got, and is
+# anything missing something I should worry about.
+Write-Phase "Summary: what this run did to the toolchain"
+if ($script:toolsPresent.Count -gt 0) {
+    Write-Host "   already there, left alone:  $($script:toolsPresent -join ', ')" -ForegroundColor Green
+}
+if ($script:toolsInstalled.Count -gt 0) {
+    Write-Host "   installed by this run:      $($script:toolsInstalled -join ', ')" -ForegroundColor Green
+}
+if ($script:toolsSkipped.Count -gt 0) {
+    Write-Host ""
+    Write-Host "   NOT installed - this account has no administrator rights:" -ForegroundColor Yellow
+    foreach ($s in $script:toolsSkipped) {
+        Write-Host ("     {0,-14} {1}" -f $s.Name, $s.Url) -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "   THIS IS NOT A PROBLEM, and nothing above was left half-done." -ForegroundColor Cyan
+    Write-Host "   Everything this workstation actually uses is installed. Those are a"
+    Write-Host "   Windows Explorer add-on and the runtime it needs; git itself is here and"
+    Write-Host "   every tool, script and editor integration uses git, not them."
+    Write-Host ""
+    Write-Host "   If you want them anyway, either is fine:"
+    Write-Host "     - run this script again from a PowerShell started with 'Run as"
+    Write-Host "       administrator', and it will pick up only what is missing; or"
+    Write-Host "     - ask whoever administers this machine to install them from the"
+    Write-Host "       addresses above. Nothing else has to be redone afterwards."
+}
+else {
+    Write-Host "   nothing was skipped." -ForegroundColor Green
 }
 Stop-Run $graphExit

@@ -40,21 +40,39 @@ One command turns a bare Windows host into a working Claude Code development env
 
 ### 需要系統管理員的項目
 
-**大部分的安裝不需要任何權限。** 以下五項是例外——它們一定要有系統管理員才裝得起來，因為
-它們寫進 `C:\Program Files`、`System32` 或 `HKEY_LOCAL_MACHINE`，而一般使用者帳戶對這三個
-地方都沒有寫入權。
+**大部分的安裝不需要任何權限。** 以下五項是例外，因為它們寫進 `C:\Program Files`、
+`System32` 或 `HKEY_LOCAL_MACHINE`，而一般使用者帳戶對這三個地方都沒有寫入權。
+
+但這五項**分成兩種**，差別很大：
+
+#### A. 一定要先有，否則腳本做不下去
+
+| 項目 | 為什麼一定要管理員 | 為什麼不能沒有 | 下載來源 |
+|---|---|---|---|
+| PowerShell 7 | 全機器安裝的 MSI，裝進 `C:\Program Files\PowerShell`。要 `-win-x64.msi` 那一個檔 | `graph-servers/install.ps1` 在低於 7 的版本上直接拒絕執行 | https://github.com/PowerShell/PowerShell/releases |
+| Node.js | 全機器安裝的 MSI，裝進 `C:\Program Files\nodejs`。要 `-x64.msi` 那一個檔 | GitNexus 用 `npm install -g` 安裝，claude-mem 用 `npx` 啟動 | https://nodejs.org/en/download |
+
+這兩項缺一個，沒有管理員權限的執行就會在最開頭停下來，把缺的列出來請你處理。
+
+#### B. 裝不了就跳過，不影響任何功能
 
 | 項目 | 為什麼一定要管理員 | 下載來源 |
 |---|---|---|
-| PowerShell 7 | 全機器安裝的 MSI，裝進 `C:\Program Files\PowerShell`。要 `-win-x64.msi` 那一個檔 | https://github.com/PowerShell/PowerShell/releases |
-| Node.js | 全機器安裝的 MSI，裝進 `C:\Program Files\nodejs`。要 `-x64.msi` 那一個檔 | https://nodejs.org/en/download |
+| TortoiseGit | 它是檔案總管的 shell extension，而 shell extension 就是一筆 `HKLM` 註冊，沒有「只裝給我自己」的版本 | https://download.tortoisegit.org/ |
 | Microsoft Visual C++ Redistributable 2015–2022（x64） | 系統執行階段，檔案放進 `System32`，並寫 `HKLM` | https://aka.ms/vs/17/release/vc_redist.x64.exe |
 | Microsoft Visual C++ Redistributable 2015–2022（x86） | 同上，放進 `SysWOW64` | https://aka.ms/vs/17/release/vc_redist.x86.exe |
-| TortoiseGit | 它是檔案總管的 shell extension，而 shell extension 就是一筆 `HKLM` 註冊，沒有「只裝給我自己」的版本 | https://download.tortoisegit.org/ |
 
-⚠ 上表第三欄刻意寫**來源**而不是釘住版本的完整檔案網址。腳本擋下來的時候，會逐項印出一個
-**完整、可以直接下載**的網址，那是給管理員照著做最省事的一份。這裡再抄一份釘住版本的網址，
-只會多出一個會過期而且沒人檢查的副本。
+⭐ **B 組沒有也沒關係**（擁有者決定，2026-10-08）。TortoiseGit 是檔案總管的圖形外掛，VC++ 執行
+階段只是它的先決條件，兩者一起進退。這個專案裡真正在用的是 **Git for Windows** 的 `git` 指令，
+而 `git` 不需要管理員（見下一節）。驗證過才這樣寫：除了 README 本身的文字和 `install.ps1` 的
+`$DEPS` 表之外，整個專案沒有任何腳本、Python 或設定檔提到 TortoiseGit、vcredist 或 vcruntime。
+
+所以**沒有管理員權限時，腳本會直接跳過 B 組繼續往下跑**，並在執行結束時列出跳過了什麼、以及
+你可以不管它。有管理員權限時照常安裝。
+
+⚠ 上表最後一欄刻意寫**來源**而不是釘住版本的完整檔案網址。腳本擋下來或跳過的時候，會逐項印出
+一個**完整、可以直接下載**的網址，那是最省事的一份。這裡再抄一份釘住版本的網址，只會多出一個
+會過期而且沒人檢查的副本。
 
 （但不要把腳本印的那一行讀成「這就是它等一下會抓的那個檔」。`git` 與 `TortoiseGit` 兩列會先向
 各自專案問出當前版本才下載，所以實際抓的網址可能版本不同，甚至主機都不同——2026-10-07 實測，
@@ -62,11 +80,11 @@ TortoiseGit 的版本查詢回覆 `baseurl=https://updater.download.tortoisegit.
 `download.tortoisegit.org`。兩個都通，而且這裡要的只是「那個工具最後有裝起來」，版本差一點不
 影響：下次執行會重新檢查。）
 
-這五項只需要請管理員裝**一次**。裝完之後，這支腳本就不會再擋你，其餘項目都可以用自己的一般
+A 組只需要請管理員裝**一次**。裝完之後，這支腳本就不會再擋你，其餘項目都可以用自己的一般
 帳戶安裝。
 
 ⚠ 但「裝好了」不等於「會自動更新」。這支腳本只檢查某個工具**在不在**，不會把已經裝好的工具
-升級到新版。所以上表五項日後要升級，仍然需要管理員。
+升級到新版。所以上面兩張表裡的項目日後要升級，仍然需要管理員。
 
 **不需要管理員的項目**，分成兩類寫，因為兩類的證據強度不一樣：
 
@@ -95,18 +113,24 @@ TortoiseGit 的版本查詢回覆 `baseurl=https://updater.download.tortoisegit.
 它會在**最開始、還沒下載任何東西之前**先檢查一次：
 
 1. 判斷目前這個行程有沒有系統管理員權限
-2. 檢查上表五項裡，哪些是這台機器上**還缺的**（已經裝好的不算）
-3. 如果一項都不缺，就直接往下跑，不會攔你。（其餘項目在設計上都屬於使用者範圍；但「一般
-   使用者帳戶從頭到尾跑完整套安裝」目前還沒有實際完整跑過一次——見上面 Python 那一條）
-4. 如果有缺，就把缺的那幾項連同下載位址列出來，告訴你兩條路（自己用系統管理員身分重跑，
-   或請管理員裝那幾項），然後**停下來**
+2. 檢查上面兩張表裡，哪些是這台機器上**還缺的**（已經裝好的不算）
+3. 缺的只有 **B 組**（TortoiseGit／VC++）→ 不攔你，直接跳過往下跑
+4. 缺的有 **A 組**（PowerShell 7／Node.js）→ 把缺的那幾項連同完整下載網址列出來，告訴你兩條
+   路（自己用系統管理員身分重跑，或請管理員裝那幾項），然後**停下來**
+5. 一項都不缺 → 直接往下跑
 
-停下來的時候它只寫了一樣東西——它自己的執行紀錄，`Debug\install-<時間戳>.log`，而且路徑會
-印在畫面上。沒有下載任何安裝檔、沒有安裝任何東西、沒有改 PATH、沒有建立其他任何資料夾。
+第 4 種情形停下來時，它只寫了一樣東西——它自己的執行紀錄，`Debug\install-<時間戳>.log`，而且
+路徑會印在畫面上。沒有下載任何安裝檔、沒有安裝任何東西、沒有改 PATH、沒有建立其他任何資料夾。
 結束碼是 1。
 
-⚠ 這個檢查只看「缺的」項目。如果 PowerShell 7、Node.js、VC++ 執行階段和 TortoiseGit 都已經
-在這台機器上了，那麼一個完全沒有管理員權限的帳戶執行這支腳本，不會被這個檢查擋下來。
+**執行結束時一定會有一份總結**（擁有者要求，2026-10-08），放在所有輸出的最後面，列出三件事：
+本來就裝好、這次沒動的／這次裝起來的／因為沒有權限而跳過的。跳過的每一項都附完整下載網址，
+並且明講那不是問題、該裝的都裝好了，想補裝的話有哪兩種做法。放在最後而不是放在工具鏈那一段，
+是因為工具鏈在四十分鐘的安裝裡只佔最前面幾分鐘，講在那裡等到跑完早就被一堆原廠安裝程式的輸出
+洗掉了。
+
+⚠ 開頭這個檢查只看「缺的」項目。如果 PowerShell 7 和 Node.js 都已經在這台機器上了，那麼一個
+完全沒有管理員權限的帳戶執行這支腳本，不會被它擋下來。
 
 ### 第一次安裝
 
@@ -133,7 +157,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 ### 安裝順序
 
 1. **PowerShell 7**——先裝它，然後整支腳本重新在它底下執行。只下載了 `install.ps1` 單檔時，接著**先裝 Git for Windows、再 clone repo**，然後交棒給 clone 裡的那份
-2. **工具鏈**——依序檢查並只補缺的：`git`、**VS Code**（使用者版，裝在 `~\AppData\Local`，不需要系統管理員）、**Microsoft Visual C++ Redistributable 2015–2022**（x64 與 x86，TortoiseGit 官方 FAQ 列的先決條件，所以排在它前面）、**TortoiseGit**、`node`、`python`、`claude`。**完全不使用 winget**：每一項都是直接下載原廠安裝檔靜默安裝。（winget 在 Windows Server 上根本沒有，而在全新的 Windows 11 上雖然有卻是壞的——2026-10-07 實測，三個工具三次都是 `Failed when opening source(s)`，白試一次才退回下載。）`git` 與 `TortoiseGit` 都會先向各自專案的來源問出當前版本，釘住的網址只是最後防線；VS Code 與 VC++ 用的是原廠「永遠指向最新版」的固定網址
+2. **工具鏈**——依序檢查並只補缺的：`git`、**VS Code**（使用者版，裝在 `~\AppData\Local`，不需要系統管理員）、**Microsoft Visual C++ Redistributable 2015–2022**（x64 與 x86，TortoiseGit 官方 FAQ 列的先決條件，所以排在它前面）、**TortoiseGit**、`node`、`python`、`claude`。**完全不使用 winget**：每一項都是直接下載原廠安裝檔靜默安裝。（winget 在 Windows Server 上根本沒有，而在全新的 Windows 11 上雖然有卻是壞的——2026-10-07 實測，三個工具三次都是 `Failed when opening source(s)`，白試一次才退回下載。）`git` 與 `TortoiseGit` 都會先向各自專案的來源問出當前版本，釘住的網址只是最後防線；VS Code 與 VC++ 用的是原廠「永遠指向最新版」的固定網址。⚠ 沒有管理員權限的執行會跳過 **TortoiseGit** 與兩個 **VC++** 執行階段（見「需要系統管理員的項目」B 組），其餘照常安裝
 3. **VS Code 擴充套件**——`anthropic.claude-code`（Claude Code extension），用 VS Code 自己的 `code --install-extension` 安裝
 4. **指令檔**——`Tools/deploy.py` 放置使用者層級的兩份與專案層級的範本
 5. **圖譜伺服器**——`graph-servers/install.ps1` 裝兩台伺服器、註冊 MCP、掛 refresh hook 與 post-commit hook、建第一次索引、啟動背景監看服務
@@ -301,23 +325,46 @@ fails or you want to take over by hand.
 
 ### What needs an administrator
 
-**Most of this install needs no special rights at all.** These five are the exception.
-They cannot be installed without an administrator because they write to
-`C:\Program Files`, `System32` or `HKEY_LOCAL_MACHINE`, and a standard user account can
-write to none of those.
+**Most of this install needs no special rights at all.** These five are the exception,
+because they write to `C:\Program Files`, `System32` or `HKEY_LOCAL_MACHINE`, and a
+standard user account can write to none of those.
+
+But the five split into two groups, and the difference matters:
+
+#### A. Must be there, or the script cannot go on
+
+| Tool | Why it needs an administrator | Why it cannot be left out | Where to get it |
+|---|---|---|---|
+| PowerShell 7 | A per-machine MSI, into `C:\Program Files\PowerShell`. Take the `-win-x64.msi` | `graph-servers/install.ps1` refuses to run under anything below 7 | https://github.com/PowerShell/PowerShell/releases |
+| Node.js | A per-machine MSI, into `C:\Program Files\nodejs`. Take the `-x64.msi` | GitNexus installs through `npm install -g`, and claude-mem starts through `npx` | https://nodejs.org/en/download |
+
+Without either of these, a run with no administrator rights stops at the very beginning and
+lists what it is waiting for.
+
+#### B. Skipped if they cannot be installed, and nothing is worse for it
 
 | Tool | Why it needs an administrator | Where to get it |
 |---|---|---|
-| PowerShell 7 | A per-machine MSI, into `C:\Program Files\PowerShell`. Take the `-win-x64.msi` | https://github.com/PowerShell/PowerShell/releases |
-| Node.js | A per-machine MSI, into `C:\Program Files\nodejs`. Take the `-x64.msi` | https://nodejs.org/en/download |
+| TortoiseGit | It is an Explorer shell extension, and a shell extension *is* an `HKLM` registration. There is no install-for-me-only form of it | https://download.tortoisegit.org/ |
 | Microsoft Visual C++ Redistributable 2015–2022 (x64) | A system runtime: its DLLs go in `System32` and it writes `HKLM` | https://aka.ms/vs/17/release/vc_redist.x64.exe |
 | Microsoft Visual C++ Redistributable 2015–2022 (x86) | The same, into `SysWOW64` | https://aka.ms/vs/17/release/vc_redist.x86.exe |
-| TortoiseGit | It is an Explorer shell extension, and a shell extension *is* an `HKLM` registration. There is no install-for-me-only form of it | https://download.tortoisegit.org/ |
 
-⚠ That last column names a SOURCE and not a pinned file, deliberately. When the script
-stops it prints, for each tool it is waiting on, one **complete address that can be
-downloaded directly** — which is the least work for the administrator doing it. A pinned
-URL copied in here would be a second copy that rots and that nothing checks.
+⭐ **Group B is genuinely optional** (owner's decision, 2026-10-08). TortoiseGit is a
+graphical Explorer add-on and the VC++ runtime is in the list only as its prerequisite, so
+the two go together. What this project actually uses is **Git for Windows** and its `git`
+command, and `git` needs no administrator (see the next section). Measured before it was
+taken as true: outside README's own prose and `install.ps1`'s `$DEPS` table, nothing in this
+repository — no script, no Python, no settings file — mentions TortoiseGit, vcredist or
+vcruntime at all.
+
+So **without administrator rights the script skips group B and carries on**, and says at the
+end of the run what it left out and that you can ignore it. With administrator rights it
+installs them as before.
+
+⚠ That last column names a SOURCE and not a pinned file, deliberately. When the script stops
+for a tool, or skips one, it prints one **complete address that can be downloaded directly**
+— the least work for whoever does it. A pinned URL copied in here would be a second copy
+that rots and that nothing checks.
 
 (Do not read the line it prints as "the exact file it would have fetched". The `git` and
 `TortoiseGit` rows ask their own projects for the current release first, so a real run may
@@ -326,12 +373,12 @@ version feed answers `baseurl=https://updater.download.tortoisegit.org/...` whil
 printed address is on `download.tortoisegit.org`. Both work, and the difference does not
 matter here: the point is only that the tool ends up present, and the next run re-checks.)
 
-An administrator installs those five **once**. After that this script stops blocking you,
-and the rest installs from your own ordinary account.
+An administrator installs group A **once**. After that this script stops blocking you, and
+the rest installs from your own ordinary account.
 
 ⚠ Installed is not kept up to date. This script only ever asks whether a tool **is
-present**; it never upgrades one that is. So upgrading any of those five later still needs
-an administrator.
+present**; it never upgrades one that is. So upgrading anything in either table later still
+needs an administrator.
 
 **What does not need an administrator**, in two groups, because the evidence behind them is
 not equally strong:
@@ -368,22 +415,31 @@ not equally strong:
 It checks once, at the very start, before downloading anything:
 
 1. Does this process hold administrator rights?
-2. Of the five tools above, which are **missing** on this machine? Ones already installed
-   do not count.
-3. Nothing missing — it carries straight on and does not stop you. (Everything after the
-   toolchain is user-scope by design; a standard user account running the whole install
-   from end to end has not yet actually been done once — see the Python entry above.)
-4. Something missing — it lists exactly those, with the addresses above, gives you the two
-   ways forward (re-run it yourself as an administrator, or ask an administrator to
-   install that list once), and **stops**.
+2. Of the tools in the two tables above, which are **missing** on this machine? Ones
+   already installed do not count.
+3. Only **group B** is missing (TortoiseGit / VC++) — it does not stop you; it skips them
+   and carries on.
+4. **Group A** is missing (PowerShell 7 / Node.js) — it lists exactly those, with a
+   complete download address each, gives you the two ways forward (re-run it yourself as an
+   administrator, or ask an administrator to install that list once), and **stops**.
+5. Nothing missing — it carries straight on.
 
-When it stops it has written exactly one thing — its own run log,
+In case 4, when it stops it has written exactly one thing — its own run log,
 `Debug\install-<timestamp>.log`, whose path it prints on screen. Nothing downloaded,
 nothing installed, no PATH changed, no other directory created. It exits 1.
 
-⚠ The check looks only at what is MISSING. On a machine that already has PowerShell 7,
-Node.js, the VC++ runtimes and TortoiseGit, an account with no administrator rights at all
-is not stopped by this check.
+**Every run ends with a summary** (owner's request, 2026-10-08), last of all the output,
+saying three things: what was already there and left alone, what this run installed, and
+what it skipped for lack of rights. Each skipped tool gets a complete download address, and
+the summary says plainly that this is not a problem, that everything the workstation uses is
+installed, and what the two ways to add them later are. It is at the END rather than in the
+toolchain phase because the toolchain is the first few minutes of a forty-minute run —
+anything said there has scrolled past half a dozen third-party installers by the time the
+run finishes.
+
+⚠ That opening check looks only at what is MISSING. On a machine that already has
+PowerShell 7 and Node.js, an account with no administrator rights at all is not stopped by
+it.
 
 ### First install
 
@@ -428,7 +484,9 @@ to it.
    identical `Failed when opening source(s)` failures before the download anyway.) `git`
    and `TortoiseGit` each ask their own project for the current version first, so the
    pinned URLs are only the last resort; VS Code and the VC++ runtime come from the
-   vendor's permanent always-current links
+   vendor's permanent always-current links. ⚠ A run without administrator rights skips
+   **TortoiseGit** and both **VC++** runtimes (group B under "What needs an administrator")
+   and installs the rest as normal
 3. **VS Code extensions** — `anthropic.claude-code`, installed through VS Code's own
    `code --install-extension`
 4. **Instruction files** — `Tools/deploy.py` places the user-scope pair and the project
