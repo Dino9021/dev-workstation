@@ -45,14 +45,30 @@ One command turns a bare Windows host into a working Claude Code development env
 
 但這五項**分成兩種**，差別很大：
 
-#### A. 一定要先有，否則腳本做不下去
+#### A. 一定要有，但沒有管理員權限時腳本會問你要不要用可攜版
 
 | 項目 | 為什麼一定要管理員 | 為什麼不能沒有 | 下載來源 |
 |---|---|---|---|
 | PowerShell 7 | 全機器安裝的 MSI，裝進 `C:\Program Files\PowerShell`。要 `-win-x64.msi` 那一個檔 | `graph-servers/install.ps1` 在低於 7 的版本上直接拒絕執行 | https://github.com/PowerShell/PowerShell/releases |
 | Node.js | 全機器安裝的 MSI，裝進 `C:\Program Files\nodejs`。要 `-x64.msi` 那一個檔 | GitNexus 用 `npm install -g` 安裝，claude-mem 用 `npx` 啟動 | https://nodejs.org/en/download |
 
-這兩項缺一個，沒有管理員權限的執行就會在最開頭停下來，把缺的列出來請你處理。
+⭐ **這兩項官方同時也有「免安裝壓縮檔」，解開就能用，完全不需要任何權限。** 所以沒有管理員
+權限又缺這兩項的時候，腳本**不會直接放棄**，而是停下來問你一句：要不要把它們裝一份在你自己的
+使用者設定檔裡？
+
+- 答 **Y**：下載原廠壓縮檔、比對原廠公布的 SHA-256、解開到
+  `~\AppData\Local\Programs\dev-workstation\`，加進你的使用者 PATH，然後**把後面所有步驟跑完**。
+- 答 **N**（或是沒回答、或 stdin 不是終端機）：**停下來**，並且把「絕對不能少的」和「建議裝但
+  可以沒有的」分成兩張清單印出來給你，讓你拿去找系統管理員。
+
+可攜版的代價講在前面：那是**你的**工具，不是這台機器的。別人登入這台機器不會有，Windows Update
+也不會更新它們，要升級是重跑這支腳本而不是靠 Windows。
+
+⛔ **可執行檔放在你自己的 `AppData` 裡，而不是 `C:\WorkSpace`，這是刻意的**（擁有者核准，
+2026-10-08）。實測：在 `C:\` 底下建的資料夾，`BUILTIN\Users` 會繼承到可寫（`(I)(CI)(WD)`，遞迴
+生效），也就是同一台機器上任何一個標準使用者都能往裡面丟檔案；而 Windows 解析 DLL 時會先看執行
+檔自己的目錄。`%LOCALAPPDATA%` 只開放給 SYSTEM、Administrators 和你本人。repo 的 clone 仍然放
+在 `C:\WorkSpace`，這條例外只針對可執行檔。
 
 #### B. 裝不了就跳過，不影響任何功能
 
@@ -115,11 +131,12 @@ A 組只需要請管理員裝**一次**。裝完之後，這支腳本就不會�
 1. 判斷目前這個行程有沒有系統管理員權限
 2. 檢查上面兩張表裡，哪些是這台機器上**還缺的**（已經裝好的不算）
 3. 缺的只有 **B 組**（TortoiseGit／VC++）→ 不攔你，直接跳過往下跑
-4. 缺的有 **A 組**（PowerShell 7／Node.js）→ 把缺的那幾項連同完整下載網址列出來，告訴你兩條
-   路（自己用系統管理員身分重跑，或請管理員裝那幾項），然後**停下來**
+4. 缺的有 **A 組**（PowerShell 7／Node.js）→ **問你要不要用可攜版**。答 Y 就裝進你自己的設定檔
+   並把後面全部跑完；答 N、沒回答、或 stdin 不是終端機，就把「絕對不能少」和「建議但可選」兩張
+   清單印出來，然後**停下來**
 5. 一項都不缺 → 直接往下跑
 
-第 4 種情形停下來時，它只寫了一樣東西——它自己的執行紀錄，`Debug\install-<時間戳>.log`，而且
+第 4 種情形答 N 而停下來時，它只寫了一樣東西——它自己的執行紀錄，`Debug\install-<時間戳>.log`，而且
 路徑會印在畫面上。沒有下載任何安裝檔、沒有安裝任何東西、沒有改 PATH、沒有建立其他任何資料夾。
 結束碼是 1。
 
@@ -176,6 +193,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 | `-SkipDeps` | 不安裝任何缺少的工具，只做設定 |
 | `-LogPath <路徑>` | 改變 log 位置 |
 | `-Cowork yes` / `-Cowork no` | 直接回答「要不要裝 claude-mem Cowork」，腳本就不會問。見下方說明 |
+| `-Portable yes` / `-Portable no` | 直接回答「沒有管理員權限時要不要用可攜版 PowerShell 7 / Node.js」。不給就是問，而「問不到」等於 no |
 | `-SelfTest` | 離線自我測試，不碰任何東西，連 log 都不寫 |
 | `-CheckUrls` | 檢查釘住的下載網址是否還活著 |
 
@@ -331,15 +349,35 @@ standard user account can write to none of those.
 
 But the five split into two groups, and the difference matters:
 
-#### A. Must be there, or the script cannot go on
+#### A. Must be there — but without rights the script offers you a portable copy
 
 | Tool | Why it needs an administrator | Why it cannot be left out | Where to get it |
 |---|---|---|---|
 | PowerShell 7 | A per-machine MSI, into `C:\Program Files\PowerShell`. Take the `-win-x64.msi` | `graph-servers/install.ps1` refuses to run under anything below 7 | https://github.com/PowerShell/PowerShell/releases |
 | Node.js | A per-machine MSI, into `C:\Program Files\nodejs`. Take the `-x64.msi` | GitNexus installs through `npm install -g`, and claude-mem starts through `npx` | https://nodejs.org/en/download |
 
-Without either of these, a run with no administrator rights stops at the very beginning and
-lists what it is waiting for.
+⭐ **Both vendors also ship a plain archive that needs no rights at all.** So when these are
+missing and you have no administrator rights, the script does **not** simply give up. It
+stops and asks you one question: shall I put a copy in your own profile?
+
+- Answer **Y** and it downloads the vendor archive, checks it against the vendor's published
+  SHA-256, expands it into `~\AppData\Local\Programs\dev-workstation\`, adds it to your user
+  PATH, and **carries on through every remaining phase**.
+- Answer **N** — or say nothing, or run with stdin redirected — and it **stops**, printing
+  two separate lists: what is strictly required, and what is recommended but optional, so
+  you have something concrete to take to whoever administers the machine.
+
+The cost of the portable route, stated up front: those are **your** tools, not the
+machine's. Nobody else signing in here will have them, Windows Update does not service them,
+and upgrading means re-running this script rather than letting Windows do it.
+
+⛔ **The executables go in your own `AppData`, not in `C:\WorkSpace`, and that is deliberate**
+(owner's approval, 2026-10-08). Measured: a directory created under `C:\` leaves
+`BUILTIN\Users` with inherited write access (`(I)(CI)(WD)`, effective and recursive), so any
+other standard user on the machine can drop files beside the executable — and Windows
+resolves many DLLs from the directory of the running program. `%LOCALAPPDATA%` is open to
+SYSTEM, Administrators and you alone. The repository clone still lives in `C:\WorkSpace`;
+this exception is only for binaries.
 
 #### B. Skipped if they cannot be installed, and nothing is worse for it
 
@@ -419,12 +457,13 @@ It checks once, at the very start, before downloading anything:
    already installed do not count.
 3. Only **group B** is missing (TortoiseGit / VC++) — it does not stop you; it skips them
    and carries on.
-4. **Group A** is missing (PowerShell 7 / Node.js) — it lists exactly those, with a
-   complete download address each, gives you the two ways forward (re-run it yourself as an
-   administrator, or ask an administrator to install that list once), and **stops**.
+4. **Group A** is missing (PowerShell 7 / Node.js) — it **asks whether to use portable
+   copies**. Answer Y and it installs them into your own profile and runs everything that
+   follows; answer N, say nothing, or run with stdin redirected, and it prints the
+   strictly-required and the recommended-but-optional lists separately, and **stops**.
 5. Nothing missing — it carries straight on.
 
-In case 4, when it stops it has written exactly one thing — its own run log,
+In case 4, when you answer N and it stops, it has written exactly one thing — its own run log,
 `Debug\install-<timestamp>.log`, whose path it prints on screen. Nothing downloaded,
 nothing installed, no PATH changed, no other directory created. It exits 1.
 
@@ -513,6 +552,7 @@ behind `-All`, and that flag is gone. Passing it does nothing and the script say
 | `-SkipDeps` | Install no missing tools; configure only |
 | `-LogPath <path>` | Move the transcript |
 | `-Cowork yes` / `-Cowork no` | Answers the one question up front, so the script does not ask. See below |
+| `-Portable yes` / `-Portable no` | Answers "use portable PowerShell 7 / Node.js when you have no administrator rights?" up front. Left out, it asks, and anything that cannot be asked counts as no |
 | `-SelfTest` | Offline self-test. Touches nothing, not even the log |
 | `-CheckUrls` | Are the pinned download URLs still alive? |
 

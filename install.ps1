@@ -111,6 +111,22 @@ param(
     # would be dropped by Get-ForwardArgs on the way to the PowerShell 7 child,
     # which would then ask a question the user had already answered.
     [ValidateSet('ask', 'yes', 'no')] [string] $Cowork = 'ask',
+    # PowerShell 7 and Node.js install from per-machine MSIs, so a user without
+    # administrator rights cannot have them - and the rest of this script genuinely cannot
+    # do without either. Both vendors also ship a plain zip, which extracts into the user's
+    # own profile and needs no rights at all.
+    #
+    # Owner, 2026-10-08: ask the person which they want, and let the ANSWER decide whether
+    # the run stops or carries on. So this is asked only where the run would otherwise
+    # stop: a NON-ELEVATED process, with one of those two actually missing.
+    #
+    # A STRING, NOT A SWITCH, for the same measured reason as -Cowork: three states, and
+    # -Portable:$false would be dropped by Get-ForwardArgs on the way to the PowerShell 7
+    # child, which would then ask again.
+    #
+    # ⛔ THE DEFAULT ON SILENCE IS NO. A redirected stdin or an unanswered countdown stops
+    # the run; it does not quietly put a toolchain somewhere the person did not choose.
+    [ValidateSet('ask', 'yes', 'no')] [string] $Portable = 'ask',
     [switch] $SelfTest,
     # Probes the pinned download URLs with a HEAD request and installs nothing.
     # Separate from -SelfTest on purpose: -SelfTest must stay offline and pure, and
@@ -329,6 +345,11 @@ function Get-Pwsh7Path {
       would relaunch itself for ever. That is also why the pwsh row cannot simply
       carry a ProbeVersion and be probed like every other row.
     #>
+    # ⭐ BOTH ARGUMENTS DEFAULT TO THE REAL MACHINE AND CAN BE OVERRIDDEN, which is the only
+    # reason the elevation rule below can be tested at all. The review that found that rule
+    # missing had to lift this function out of the file and edit a copy to demonstrate it;
+    # a defect that can only be shown that way is one no test will catch next time.
+    param([bool] $Elevated = (Test-IsElevated), [string] $PortableRoot = $PORTABLE_ROOT)
     $p = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue |
          Where-Object { $_.Version -and $_.Version.Major -ge 7 } |
          Select-Object -First 1 -ExpandProperty Source
@@ -337,7 +358,46 @@ function Get-Pwsh7Path {
         $probe = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
         if (Test-Path -LiteralPath $probe) { $p = $probe }
     }
+    # ⛔ THE PORTABLE COPY IS INVISIBLE TO AN ELEVATED RUN, AND THAT IS THE WHOLE POINT.
+    # Review of the portable ADR caught this: without the elevation test, a machine that
+    # once had a portable copy made for it would report pwsh PRESENT to an ADMINISTRATOR
+    # too - because Test-DependencyPresent answers the pwsh row with this function and
+    # phase 2 skips anything that reads present. The administrator would then silently
+    # stop installing the per-machine MSI, which is the opposite of the promise that an
+    # elevated run is unchanged. Measured by the reviewer on a lifted copy of this
+    # function, with a negative control.
+    #
+    # ⚠ The location is LOOKED UP from the pwsh row, never written out here. A second copy
+    # of 'pwsh-7.6.6\pwsh.exe' would go stale the first time the pin is bumped, and the
+    # symptom would be a portable copy that installs and is then never found again.
+    if ((-not $p) -and (-not $Elevated)) {
+        $row = $DEPS | Where-Object { $_.Name -eq 'pwsh' }
+        if ($row -and $row.Portable) {
+            $probe = Join-Path (Get-PortableDir $PortableRoot $row) $row.Portable.Probe
+            if (Test-Path -LiteralPath $probe) { $p = $probe }
+        }
+    }
     return $p
+}
+
+function Test-ArchiveHash {
+    <#
+      Does a downloaded archive match the hash pinned on its row?
+
+      PURE, and separate from the download for exactly one reason: this is the ONLY
+      integrity check a portable install gets. Every other row in this table goes through
+      an installer that is at least signed; an expanded zip is not. A comparison buried
+      inside the function that does the I/O cannot be driven by a test, and an integrity
+      check no test exercises is a comment.
+
+      Case-insensitive because Get-FileHash returns upper case and both vendors publish
+      lower. An empty expected value is a FAILURE, never a pass - a row that lost its
+      Sha256 must not become a row that accepts anything.
+    #>
+    param([string] $Expected, [string] $Actual)
+    if (-not $Expected) { return $false }
+    if (-not $Actual) { return $false }
+    return ($Expected.Trim().ToUpperInvariant() -eq $Actual.Trim().ToUpperInvariant())
 }
 
 function Test-IsElevated {
@@ -397,6 +457,112 @@ function Select-AdminBlocker {
     # other half of this, and the two must stay disjoint or a row would be both skipped and
     # stopped for.
     return @($rows | Where-Object { $_.NeedsAdmin -and (-not $_.Optional) })
+}
+
+function Get-PortableDir {
+    <#
+      Where a row's portable copy lives, once expanded. PURE - it takes the root rather
+      than reading $PORTABLE_ROOT - so the self-test can drive it without touching a disk.
+
+      Both archives end up with ONE directory holding the executable, but they get there
+      differently and the difference is measured, not assumed: PowerShell's zip is flat, so
+      we make the directory; Node's carries its own top-level folder, so we expand into the
+      root and that folder IS the directory. Returning one path from one place is what stops
+      the two shapes leaking into every caller.
+    #>
+    param([string] $Root, $Dep)
+    if (-not $Dep.Portable) { return $null }
+    return (Join-Path $Root $Dep.Portable.Dir)
+}
+
+function Test-PortablePresent {
+    # Is this row's portable copy already expanded and complete? The PROBE, never the
+    # directory: a half-expanded archive leaves a directory behind, and a run that took
+    # that for an install would put a dead path on PATH and report success.
+    param([string] $Root, $Dep)
+    $dir = Get-PortableDir $Root $Dep
+    if (-not $dir) { return $false }
+    return (Test-Path -LiteralPath (Join-Path $dir $Dep.Portable.Probe))
+}
+
+function Select-PortableCandidate {
+    <#
+      Of the rows that are BLOCKING this run, which could be offered as a portable copy
+      instead - and are they all offerable?
+
+      PURE. The gate must not offer a choice it cannot honour: if even one blocker has no
+      Portable route, saying yes would install some of them and then stop anyway, which is
+      worse than stopping now. So the caller asks for Offerable, which is true only when
+      EVERY blocker has a route.
+    #>
+    param($Blockers)
+    $rows = @($Blockers)
+    $with = @($rows | Where-Object { $_.Portable })
+    return [pscustomobject]@{
+        Rows      = $with
+        Without   = @($rows | Where-Object { -not $_.Portable })
+        Offerable = (($rows.Count -gt 0) -and ($with.Count -eq $rows.Count))
+    }
+}
+
+function Install-PortableDependency {
+    <#
+      Download a vendor archive and expand it into the user's own profile. No registry, no
+      Program Files, no installer, no rights.
+
+      ⛔ SHA-256 AGAINST THE VENDOR'S PUBLISHED VALUE, not a magic-byte sniff. Every other
+      row here goes through an installer that is at least signed; an expanded zip is not,
+      so this is the only integrity check there is, and the hash is pinned on the row beside
+      the URL. A mismatch throws and expands nothing.
+
+      ⚠ Expand-Archive's cost is PER ENTRY, not per byte - measured under Windows
+      PowerShell 5.1: 24 s for the 106 MB PowerShell zip and 62 s for the 37 MB Node zip.
+      So the progress line says what it is doing; a silent minute reads as a hang.
+    #>
+    param($Dep)
+
+    $p = $Dep.Portable
+    if (-not $p) { throw "$($Dep.Name): no portable archive is defined for this row" }
+    $dir = Get-PortableDir $PORTABLE_ROOT $Dep
+
+    if (Test-PortablePresent $PORTABLE_ROOT $Dep) {
+        Write-Host "   already expanded at $dir" -ForegroundColor Green
+        Add-UserPathEntry $dir
+        return
+    }
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $dest = Join-Path $env:TEMP $p.File
+    Write-Host "   downloading $($p.Url)"
+    $savedProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try { Invoke-WebRequest -Uri $p.Url -OutFile $dest -UseBasicParsing -ErrorAction Stop }
+    finally { $ProgressPreference = $savedProgress }
+
+    Write-Host "   checking SHA-256 against the vendor's published value"
+    $got = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+    if (-not (Test-ArchiveHash $p.Sha256 $got)) {
+        throw "$($Dep.Name): the archive does not match its published SHA-256. expected $($p.Sha256.ToUpper()), got $got - NOT expanding it."
+    }
+
+    # Where it is expanded TO depends on whether the archive carries its own folder; where
+    # it ends UP is Get-PortableDir either way.
+    $target = $PORTABLE_ROOT
+    if (-not $p.OwnFolder) { $target = $dir }
+    if (-not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
+
+    Write-Host "   expanding into $dir (this takes a minute - the cost is per file, not per megabyte)"
+    Expand-Archive -LiteralPath $dest -DestinationPath $target -Force
+
+    # Read the artefact back, never the command. A zip whose shape changed upstream expands
+    # perfectly and leaves the executable somewhere else.
+    $probe = Join-Path $dir $p.Probe
+    if (-not (Test-Path -LiteralPath $probe)) {
+        throw "$($Dep.Name): expanded, but $probe is not there - the archive's layout is not what this row expects."
+    }
+    Write-Host "   $probe" -ForegroundColor Green
+    Add-UserPathEntry $dir
+    $script:toolsPortable += $Dep.Name
 }
 
 function Select-SkippableRow {
@@ -484,7 +650,7 @@ function ConvertTo-YesNo {
     return $null
 }
 
-function Read-CoworkAnswer {
+function Read-YesNoAnswer {
     <#
       Asks once, at the start of the run, and returns 'yes' or 'no' - never 'ask'.
 
@@ -498,11 +664,16 @@ function Read-CoworkAnswer {
       the loop started was read 0.2s into it and taken as the answer. A stray
       Enter from launching the script must not answer a question nobody saw.
     #>
-    param([int] $Seconds = 30)
+    param([int] $Seconds = 30,
+          [string] $What = 'claude-mem Cowork',
+          [string] $Prompt = 'Install claude-mem Cowork? (Y/N, empty = N)',
+          [string] $FlagHint = 'Pass -Cowork yes to install it in an unattended run.',
+          [string] $YesText = 'Cowork WILL be installed.',
+          [string] $NoText = 'Cowork will NOT be installed.')
 
     if ([Console]::IsInputRedirected) {
-        Write-Host "   stdin is not a terminal, so there is nobody to ask: NOT installing it." -ForegroundColor Yellow
-        Write-Host "   Pass -Cowork yes to install it in an unattended run."
+        Write-Host "   stdin is not a terminal, so there is nobody to ask: the answer is NO." -ForegroundColor Yellow
+        Write-Host "   $FlagHint"
         return 'no'
     }
 
@@ -515,7 +686,7 @@ function Read-CoworkAnswer {
 
     if (-not $timed) {
         while ($true) {
-            $typed = Read-Host "   Install claude-mem Cowork? (Y/N, empty = N)"
+            $typed = Read-Host "   $Prompt"
             if ($typed.Trim() -eq '') { return 'no' }
             $answer = ConvertTo-YesNo $typed.Trim().Substring(0, 1)
             if ($answer) { return $answer }
@@ -528,11 +699,11 @@ function Read-CoworkAnswer {
             $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
             $answer = ConvertTo-YesNo ([string] $key.Character) $key.VirtualKeyCode
             if ($answer -eq 'yes') {
-                Write-Host "`r   Y - Cowork WILL be installed.                                        " -ForegroundColor Yellow
+                Write-Host "`r   Y - $YesText                                                         " -ForegroundColor Yellow
                 return 'yes'
             }
             if ($answer -eq 'no') {
-                Write-Host "`r   N - Cowork will NOT be installed.                                    " -ForegroundColor Green
+                Write-Host "`r   N - $NoText                                                          " -ForegroundColor Green
                 return 'no'
             }
         }
@@ -542,7 +713,7 @@ function Read-CoworkAnswer {
             Start-Sleep -Milliseconds 200
         }
     }
-    Write-Host "`r   no answer in $Seconds seconds - Cowork will NOT be installed.        " -ForegroundColor Green
+    Write-Host "`r   no answer in $Seconds seconds - $NoText                              " -ForegroundColor Green
     return 'no'
 }
 
@@ -620,6 +791,10 @@ $extFailed = @()
 $script:toolsInstalled = @()
 $script:toolsPresent = @()
 $script:toolsSkipped = @()
+# Tools that went in as a portable, user-scope copy rather than the per-machine installer.
+# Named separately because the summary has to say so: they are this account's tools, not
+# the machine's, and nobody else signing in will see them.
+$script:toolsPortable = @()
 
 function Start-RunLog {
     param([string] $Path)
@@ -683,9 +858,17 @@ $DEPS = @(
     # MEASURED: msiexec answered 1601 - "the Windows Installer service could not be
     # accessed". A per-machine MSI, and the standard user cannot even Get-Service
     # msiserver on that host. Nothing was installed and nothing was left behind.
+    # Portable: the same release's plain zip, for an account that cannot run the MSI. Flat -
+    # pwsh.exe sits at the ARCHIVE ROOT, measured - so it is expanded into a directory this
+    # script makes. Sha256 is the vendor's own, from hashes.sha256 beside the release.
     @{ Name = 'pwsh'; Exe = 'pwsh'; NeedsAdmin = $true;
        Url = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi';
-       File = 'PowerShell-7.6.6-win-x64.msi'; Args = @('/qn', '/norestart', 'ADD_PATH=1') }
+       File = 'PowerShell-7.6.6-win-x64.msi'; Args = @('/qn', '/norestart', 'ADD_PATH=1');
+       Portable = @{
+           Url = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip';
+           File = 'PowerShell-7.6.6-win-x64.zip';
+           Sha256 = '02fe458be20493fbdf43f61ea20610b811ee6c738ab1676c61b9cfcd1a33c860';
+           Dir = 'pwsh-7.6.6'; OwnFolder = $false; Probe = 'pwsh.exe' } }
 
     # git FIRST after pwsh (owner, 2026-10-07): it is what a lone install.ps1 needs
     # to clone the repository, and TortoiseGit needs it too. The bootstrap installs
@@ -815,9 +998,23 @@ $DEPS = @(
     # npm has no row: it ships with node, and there is no separate npm download.
     # NeedsAdmin: measured 1601. A per-machine MSI, and its destination is the nodejs
     # directory under Program Files, which a standard user cannot write.
+    # Portable: the same release's zip. ⚠ UNLIKE PowerShell'S, THIS ARCHIVE CARRIES ITS OWN
+    # TOP-LEVEL FOLDER - measured, `node-v24.21.0-win-x64/`, with node.exe, npm.cmd, npm.ps1,
+    # npx.cmd and corepack.cmd directly inside it - so it is expanded into the ROOT and the
+    # folder it creates IS the directory that goes on PATH. Getting this backwards buries
+    # node.exe one level too deep, which nothing would notice until npm failed.
+    #
+    # ⭐ npm install -g FROM A PORTABLE node WRITES INTO THAT SAME DIRECTORY: the zip ships
+    # no `prefix` line, which is the one the MSI sets to %APPDATA%\npm. Measured during the
+    # ADR review, and it is why GitNexus still ends up on PATH afterwards.
     @{ Name = 'node'; Exe = 'node'; NeedsAdmin = $true;
        Url = 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi';
-       File = 'node-v24.21.0-x64.msi'; Args = @('/qn', '/norestart') }
+       File = 'node-v24.21.0-x64.msi'; Args = @('/qn', '/norestart');
+       Portable = @{
+           Url = 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip';
+           File = 'node-v24.21.0-win-x64.zip';
+           Sha256 = '158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541';
+           Dir = 'node-v24.21.0-win-x64'; OwnFolder = $true; Probe = 'node.exe' } }
 
     # InstallAllUsers=0 is the load-bearing argument. A machine-wide Python puts
     # packages in Program Files, after which pip install needs admin - and that is
@@ -928,6 +1125,24 @@ $REPO_URL = 'https://github.com/Dino9021/dev-workstation.git'
 # so the non-administrator install the owner wants to test next can both make this
 # directory and write inside it.
 $WORKSPACE_ROOT = 'C:\WorkSpace'
+
+# ⛔ EXECUTABLES GO IN THE USER'S OWN PROFILE, AND THAT IS A NAMED EXCEPTION TO THE
+# C:\WorkSpace RULE. The owner's standing instruction (2026-10-07) is that directories this
+# script creates live under C:\WorkSpace, and the clone still does. Binaries do not, and the
+# owner approved the exception on 2026-10-08 after the measurement that forced the question:
+#
+#   C:\ grants BUILTIN\Users AppendData + CreateFiles with ContainerInherit, so a directory
+#   a standard user creates there is one that EVERY OTHER standard user on the machine can
+#   put files into - measured, and icacls shows BUILTIN\Users:(I)(CI)(WD) effective and
+#   recursive. %LOCALAPPDATA% grants SYSTEM, Administrators and the owner, and nobody else.
+#
+# Windows resolves many DLLs from the directory of the running executable, and against the
+# KnownDLLs list node.exe has 22 plantable import names and pwsh.exe 55. Putting those two
+# where a peer account can write beside them would turn a convenient path into a
+# privilege-escalation step. Microsoft's own install-powershell.ps1 defaults here too.
+#
+# See Memory/tasks/20261007-010000-non-admin-install/ADR-portable-toolchain.md, J1.
+$PORTABLE_ROOT = Join-Path $env:LOCALAPPDATA 'Programs\dev-workstation'
 
 # ⛔ CLAUDE CODE PLUGINS INSTALLED BY DEFAULT (owner, 2026-10-06 - they used to be
 # optional, behind -All, or not here at all).
@@ -1703,6 +1918,139 @@ function Invoke-SelfTest {
     $optNoUrl = @($DEPS | Where-Object { $_.Optional -and (-not $_.Url) })
     Check 'skip: every Optional row has a URL for the summary to print' ($optNoUrl.Count -eq 0)
 
+    # ------------------------------------ the portable toolchain (owner, 2026-10-08)
+    # Exactly which rows may be portable, by name. pwsh and node, and nothing else: the
+    # other three administrator-only rows CANNOT be portable in principle - an Explorer
+    # shell extension is an HKLM registration and a system runtime is a system runtime.
+    $portNames = (@($DEPS | Where-Object { $_.Portable } | ForEach-Object { $_.Name }) | Sort-Object) -join ','
+    Check 'portable: exactly {node,pwsh} have an archive route' ($portNames -eq 'node,pwsh')
+    foreach ($n in @('tortoisegit', 'vcredist-x64', 'vcredist-x86')) {
+        $row = $DEPS | Where-Object { $_.Name -eq $n }
+        Check "portable: $n has NO archive route, and cannot have one" ((@($row).Count -eq 1) -and (-not $row.Portable))
+    }
+    # Every field the installer dereferences, on every portable row. A missing Sha256 would
+    # mean an unverified archive expanded into the user's profile.
+    foreach ($row in @($DEPS | Where-Object { $_.Portable })) {
+        $p = $row.Portable
+        $ok = $p.Url -and $p.File -and $p.Sha256 -and $p.Dir -and $p.Probe -and ($p.Sha256 -match '^[0-9a-fA-F]{64}$')
+        Check "portable: $($row.Name) carries a complete archive row including a 64-hex SHA-256" ([bool] $ok)
+    }
+
+    # The two archive shapes, which are measured and differ. Getting OwnFolder backwards
+    # buries the executable one level deep or scatters 661 files into the root, and nothing
+    # would notice until a later phase could not find npm.
+    $pwshRowP = $DEPS | Where-Object { $_.Name -eq 'pwsh' }
+    $nodeRowP = $DEPS | Where-Object { $_.Name -eq 'node' }
+    Check 'portable: the PowerShell zip is flat, so this script makes the directory' ($pwshRowP.Portable.OwnFolder -eq $false)
+    Check 'portable: the Node zip brings its own folder, so it expands into the root' ($nodeRowP.Portable.OwnFolder -eq $true)
+    Check 'portable: and the Node directory IS that folder name' ($nodeRowP.Portable.Dir -eq 'node-v24.21.0-win-x64')
+
+    # Get-PortableDir is pure and takes the root, so this is driven offline against a path
+    # that does not exist.
+    # ⚠ A REAL DRIVE, and a directory on it that does not exist. The first version used
+    # 'X:\nowhere' - PowerShell 7's Join-Path VALIDATES the drive and wrote an error to
+    # stderr for every call, three times, while still returning the right string. So the
+    # cases passed, the count stayed 166/0, and the only thing that noticed was the
+    # mutation suite's stderr check. A test that is right and noisy is a test nobody can
+    # read a clean run from.
+    $fakeRoot = Join-Path ([IO.Path]::GetTempPath()) 'ws-selftest-no-such-dir'
+    Check 'portable: the directory is root + Dir' ((Get-PortableDir $fakeRoot $nodeRowP) -eq (Join-Path $fakeRoot 'node-v24.21.0-win-x64'))
+    Check 'portable: a row with no archive has no directory' ($null -eq (Get-PortableDir $fakeRoot $fakeUser))
+    Check 'portable: nothing is present under a root that does not exist' (-not (Test-PortablePresent $fakeRoot $nodeRowP))
+
+    # ⛔ ALL OR NOTHING. Offering a choice that cannot be honoured would install some of the
+    # blockers and then stop anyway, after the person had answered.
+    $fakePort = @{ Name = 'has-archive'; NeedsAdmin = $true; Portable = @{ Dir = 'd'; Probe = 'x.exe' } }
+    $bothOff = Select-PortableCandidate @($fakePort, $pwshRowP)
+    Check 'portable: offerable when EVERY blocker has an archive' ($bothOff.Offerable -and ($bothOff.Rows.Count -eq 2))
+    $oneOff = Select-PortableCandidate @($fakePort, $fakeAdmin)
+    Check 'portable: NOT offerable when even one blocker has none' (-not $oneOff.Offerable)
+    Check 'portable: and it names the one without' (($oneOff.Without.Count -eq 1) -and ($oneOff.Without[0].Name -eq 'needs-admin'))
+    # Nothing blocking is not an offer either - there would be nothing to install.
+    Check 'portable: an empty blocker list is not offerable' (-not (Select-PortableCandidate @()).Offerable)
+
+    # The portable root is in the user's own profile, which is the whole of the owner's
+    # 2026-10-08 approval. A later edit moving it under C:\WorkSpace would put executables
+    # where every other standard user on the machine can write beside them.
+    Check 'portable: the root is inside LOCALAPPDATA' ($PORTABLE_ROOT.StartsWith($env:LOCALAPPDATA))
+    Check 'portable: the root is NOT under the workspace root' (-not $PORTABLE_ROOT.StartsWith($WORKSPACE_ROOT))
+
+    # ⛔ THE REGRESSION THE ADR REVIEW FOUND, now driven directly instead of by lifting the
+    # function out of the file and editing a copy. A real pwsh.exe is faked under a
+    # temporary root; an ELEVATED run must not see it, because Test-DependencyPresent
+    # answers the pwsh row with this function and phase 2 skips whatever reads present - so
+    # an administrator on a machine with a portable copy would silently stop installing the
+    # per-machine MSI.
+    $tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("ws-selftest-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        $fakeDir = Join-Path $tmpRoot $pwshRowP.Portable.Dir
+        New-Item -ItemType Directory -Path $fakeDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $fakeDir $pwshRowP.Portable.Probe) -Value 'not really pwsh' -Encoding ASCII
+        # The control: without a real pwsh on PATH these would be the only hits. There IS
+        # one on this machine, so the case asserts the DIFFERENCE between the two calls
+        # rather than either answer on its own.
+        # ⛔ THE FALLBACK IS ONLY REACHED WHEN THE TWO PROBES ABOVE IT FAIL, so on a machine
+        # that HAS PowerShell 7 - which is every machine this self-test normally runs on -
+        # neither answer would ever touch the portable path and the case would pass without
+        # exercising anything. Measured: the mutation that removes the elevation test
+        # SURVIVED the first version of this case for exactly that reason. So both probes
+        # are blinded here, process-locally, and restored in the finally.
+        $savedPath2 = $env:PATH
+        $savedPF = $env:ProgramFiles
+        try {
+            $env:PATH = (($env:PATH -split ';') | Where-Object { $_ -and ($_ -notmatch 'PowerShell') }) -join ';'
+            $env:ProgramFiles = Join-Path ([IO.Path]::GetTempPath()) 'ws-selftest-no-program-files'
+            # ⚠ [string], and not decoration. `-like` against a collection FILTERS instead of
+            # answering true or false, so an empty result reaches Check as System.Object[]
+            # and the case dies on an argument-transformation error rather than failing -
+            # which is how it first showed up here. Coercing makes the comparison scalar
+            # whatever the function returns. (Measured separately: in production it returns
+            # $null when nothing is found, and phase 1's `if (-not $pwshPath)` handles that.)
+            $asUser = [string] (Get-Pwsh7Path -Elevated $false -PortableRoot $tmpRoot)
+            $asAdmin = [string] (Get-Pwsh7Path -Elevated $true -PortableRoot $tmpRoot)
+            # Did the blinding work? If some other pwsh 7 is still resolvable the positive
+            # half cannot be exercised, and the case says so instead of passing quietly.
+            $stillVisible = [bool] (Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue |
+                                    Where-Object { $_.Version -and $_.Version.Major -ge 7 })
+            if ($stillVisible) {
+                Check 'portable: SKIPPED the positive half - a pwsh 7 survived the blinding' $true
+            }
+            else {
+                Check 'portable: a NON-elevated run DOES find the portable pwsh' ($asUser -like "$tmpRoot*")
+            }
+            # The regression itself, and it holds either way: elevated, the portable copy is
+            # never the answer, even when there is nothing else to find.
+            Check 'portable: an ELEVATED run NEVER resolves to the portable pwsh' ($asAdmin -notlike "$tmpRoot*")
+        }
+        finally {
+            $env:PATH = $savedPath2
+            $env:ProgramFiles = $savedPF
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tmpRoot) { Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    # The archive integrity check, which is the only one a portable install gets.
+    $realHash = '158F7685B44DE51F6C0DF1D153526CBCD3E1BC739A8DFC607721CEF75DE9E541'
+    Check 'portable: a matching hash passes, whatever the case' (Test-ArchiveHash $nodeRowP.Portable.Sha256 $realHash)
+    Check 'portable: one wrong character FAILS' (-not (Test-ArchiveHash $nodeRowP.Portable.Sha256 ($realHash -replace '^1', '2')))
+    # ⛔ The lookalike that matters: an EMPTY expectation must not accept everything. A row
+    # that lost its Sha256 would otherwise silently become a row that expands any bytes.
+    Check 'portable: an EMPTY expected hash never passes' (-not (Test-ArchiveHash '' $realHash))
+    Check 'portable: an empty actual hash never passes' (-not (Test-ArchiveHash $nodeRowP.Portable.Sha256 ''))
+
+    # -CheckUrls must see the archive URLs. Before the field existed this loop read $d.Url
+    # and $d.Script only, so a rotted archive link would have been invisible to the one
+    # command whose job is finding rotted links.
+    $urlRows = @()
+    foreach ($d in $DEPS) {
+        if ($d.Url) { $urlRows += $d.Url } elseif ($d.Script) { $urlRows += $d.Script }
+        if ($d.Portable) { $urlRows += $d.Portable.Url }
+    }
+    Check 'portable: both archive URLs are in the -CheckUrls set' (
+        ($urlRows -contains $pwshRowP.Portable.Url) -and ($urlRows -contains $nodeRowP.Portable.Url))
+
     # ---------------------------------------------- the exit-code hints
     Check 'hint: 1601 says administrator' ((Get-InstallExitHint 1601) -match 'administrator')
     Check 'hint: 5 says administrator' ((Get-InstallExitHint 5) -match 'administrator')
@@ -1736,6 +2084,12 @@ function Invoke-UrlCheck {
     foreach ($d in $DEPS) {
         if ($d.Url) { $rows += @{ Name = $d.Name; Url = $d.Url } }
         elseif ($d.Script) { $rows += @{ Name = $d.Name; Url = $d.Script } }
+        # ⛔ AND THE PORTABLE ARCHIVE, which is a SECOND pinned URL on the same row. Review
+        # of the portable ADR found this blind spot before the field existed: this loop read
+        # $d.Url and $d.Script and nothing else, so a rotted archive link would have been
+        # invisible to the one command that exists to find rotted links - and it would have
+        # surfaced in front of a user with no administrator rights and no way round it.
+        if ($d.Portable) { $rows += @{ Name = "$($d.Name) (portable)"; Url = $d.Portable.Url } }
     }
     # The control must 404. A version that will never exist.
     $rows += @{ Name = 'CONTROL(404)'; Url = 'https://nodejs.org/dist/v0.0.0/node-v0.0.0-x64.msi' }
@@ -1918,7 +2272,7 @@ if (-not $SkipDeps) {
                         -Pwsh7Found ([bool] (Get-Pwsh7Path)) -Elevated (Test-IsElevated))
     if ($gateBlockers.Count -gt 0) {
         Write-Host ""
-        Write-Host "STOP - this account cannot install everything that is missing." -ForegroundColor Red
+        Write-Host "This account cannot install everything that is missing." -ForegroundColor Yellow
         Write-Host ""
         Write-Host "   You are running without administrator rights, and these are both MISSING" -ForegroundColor Yellow
         Write-Host "   and installable only by an administrator:" -ForegroundColor Yellow
@@ -1933,22 +2287,107 @@ if (-not $SkipDeps) {
         foreach ($b in $gateBlockers) {
             Write-Host ("     {0,-14} {1}" -f $b.Name, $b.Url) -ForegroundColor Yellow
         }
-        Write-Host ""
-        Write-Host "   Two ways past this, either is fine:" -ForegroundColor Cyan
-        Write-Host "     1. Run this script again from a PowerShell started with 'Run as"
-        Write-Host "        administrator', if you have an administrator account on this machine."
-        Write-Host "     2. Ask whoever administers this machine to install the tools listed"
-        Write-Host "        above from those addresses, once. Then run this script again as"
-        Write-Host "        yourself - everything else installs without any rights at all."
-        Write-Host ""
-        Write-Host "   README.md, section 'What needs an administrator', is the same list with" -ForegroundColor Cyan
-        Write-Host "   the reason for each one." -ForegroundColor Cyan
-        if ($CheckOnly) {
+        # Can every one of them be offered as a portable copy? All or nothing: installing
+        # some and then stopping anyway is worse than stopping now, and the person would
+        # have answered a question that could not be honoured.
+        $cand = Select-PortableCandidate $gateBlockers
+
+        if ($cand.Offerable -and (-not $CheckOnly)) {
+            Write-Host "   But you do not have to stop here." -ForegroundColor Cyan
             Write-Host ""
-            Write-Host "   -CheckOnly: a real run would STOP here. Carrying on with the report." -ForegroundColor Yellow
+            Write-Host "   Both of those also ship as a plain archive that needs NO rights at all."
+            Write-Host "   This script can put a copy in YOUR OWN profile instead:"
+            Write-Host "     $PORTABLE_ROOT"
+            Write-Host "   and add it to your PATH. Nothing machine-wide, nothing in the registry,"
+            Write-Host "   nothing another account on this machine can see or write to."
+            Write-Host ""
+            Write-Host "   What you give up: these are yours, not the machine's. Another person"
+            Write-Host "   signing in here will not have them, Windows Update will not service"
+            Write-Host "   them, and an upgrade is this script's job rather than Windows'."
+            Write-Host ""
+
+            if ($Portable -eq 'ask') {
+                $Portable = Read-YesNoAnswer 30 `
+                    -Prompt 'Install portable copies in your own profile? (Y/N, empty = N)' `
+                    -FlagHint 'Pass -Portable yes to do it in an unattended run, or -Portable no to stop.' `
+                    -YesText 'portable copies WILL be installed.' `
+                    -NoText 'stopping, and nothing was installed.'
+                $script:portableAsked = $true
+            }
+        }
+
+        if ($cand.Offerable -and ($Portable -eq 'yes') -and (-not $CheckOnly)) {
+            Write-Phase "Portable toolchain, in your own profile"
+            foreach ($b in $cand.Rows) {
+                Write-Host ""
+                Write-Host "   installing $($b.Name) as a portable copy" -ForegroundColor Cyan
+                Install-PortableDependency $b
+            }
+            Update-PathFromRegistry
+            # Read them BACK. An archive that expanded without error and left the tool
+            # somewhere else would otherwise be discovered four phases later.
+            # Named locals rather than inline calls, so this re-check does not read as a
+            # byte-identical twin of the gate's own call twenty lines up - two identical
+            # call sites make every mutation aimed at one of them ambiguous, which the
+            # mutation suite reports as NOT APPLIED rather than silently testing nothing.
+            $afterMissing = Get-MissingDependency $DEPS
+            $afterPwsh7 = [bool] (Get-Pwsh7Path)
+            $stillBlocked = @(Select-AdminBlocker -Deps $DEPS -Missing $afterMissing `
+                                -Pwsh7Found $afterPwsh7 -Elevated (Test-IsElevated))
+            if ($stillBlocked.Count -gt 0) {
+                Write-Host ""
+                Write-Host "   STILL missing after the portable install: $(($stillBlocked | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Red
+                Write-Host "   Close this terminal and run the script again so PATH is rebuilt" -ForegroundColor Red
+                Write-Host "   from scratch. If that does not help, the archive layout has changed." -ForegroundColor Red
+                Stop-Run 1
+            }
+            Write-Host ""
+            Write-Host "   done - carrying on with the rest of the install." -ForegroundColor Green
+            # Fall through. $gateBlockers is spent; the run continues as a normal one.
         }
         else {
-            Stop-Run 1
+            # Either there is no portable route, or the person said no. Stop, and make the
+            # two kinds of missing tool impossible to confuse (owner, 2026-10-08).
+            Write-Host ""
+            Write-Host "   STOPPING. Nothing has been installed." -ForegroundColor Red
+            Write-Host ""
+            Write-Host "   REQUIRED - this script cannot do anything useful without them:" -ForegroundColor Red
+            foreach ($b in $gateBlockers) {
+                Write-Host ("     {0,-14} {1}" -f $b.Name, $b.Url) -ForegroundColor Red
+            }
+            # The optional ones are reported here too, because the person asking their
+            # administrator for one list may as well ask for both at the same time.
+            $gateOptional = @(Select-SkippableRow $gateMissing (Test-IsElevated))
+            if ($gateOptional.Count -gt 0) {
+                Write-Host ""
+                Write-Host "   RECOMMENDED, but the install works without them:" -ForegroundColor Yellow
+                foreach ($o in $gateOptional) {
+                    Write-Host ("     {0,-14} {1}" -f $o.Name, $o.Url) -ForegroundColor Yellow
+                }
+                Write-Host "     TortoiseGit is the graphical way to use git in Windows Explorer."
+                Write-Host "     It is worth having, and the two VC++ runtimes are what it needs."
+                Write-Host "     Nothing in this workstation depends on them - git itself does not."
+            }
+            Write-Host ""
+            Write-Host "   Three ways forward, any of them is fine:" -ForegroundColor Cyan
+            Write-Host "     1. Run this script again and answer Y to the portable question, or"
+            Write-Host "        pass -Portable yes. Nothing on this list is needed then."
+            Write-Host "     2. Run it from a PowerShell started with 'Run as administrator',"
+            Write-Host "        if you have an administrator account on this machine."
+            Write-Host "     3. Ask whoever administers this machine to install the REQUIRED list"
+            Write-Host "        once - and the RECOMMENDED one while they are there. Then run this"
+            Write-Host "        script again as yourself."
+            Write-Host ""
+            Write-Host "   README.md, section 'What needs an administrator', is the same two lists" -ForegroundColor Cyan
+            Write-Host "   with the reason for each one." -ForegroundColor Cyan
+            if ($CheckOnly) {
+                Write-Host ""
+                Write-Host "   -CheckOnly: a real run would ask about portable copies here, and" -ForegroundColor Yellow
+                Write-Host "   stop on an answer of N. Carrying on with the report." -ForegroundColor Yellow
+            }
+            else {
+                Stop-Run 1
+            }
         }
     }
 }
@@ -1987,7 +2426,7 @@ if ($Cowork -eq 'ask' -and -not $CheckOnly) {
     Write-Host "   It therefore SENDS YOUR TOOL USE TO AN EXTERNAL SERVICE (cmem.ai)." -ForegroundColor Yellow
     Write-Host "   Step 5's local claude-mem does not, and does not need this. Default: N."
     Write-Host ""
-    $Cowork = Read-CoworkAnswer 30
+    $Cowork = Read-YesNoAnswer 30
     $script:coworkAsked = $true
 }
 
@@ -2721,23 +3160,31 @@ if ($script:toolsPresent.Count -gt 0) {
 if ($script:toolsInstalled.Count -gt 0) {
     Write-Host "   installed by this run:      $($script:toolsInstalled -join ', ')" -ForegroundColor Green
 }
+if ($script:toolsPortable.Count -gt 0) {
+    Write-Host ""
+    Write-Host "   installed as a PORTABLE copy, in your profile only:  $($script:toolsPortable -join ', ')" -ForegroundColor Cyan
+    Write-Host "     $PORTABLE_ROOT"
+    Write-Host "   They are on YOUR PATH and nobody else's. Another person signing in to this"
+    Write-Host "   machine will not have them, and Windows Update does not service them -"
+    Write-Host "   re-run this script to pick up a newer version."
+}
 if ($script:toolsSkipped.Count -gt 0) {
     Write-Host ""
-    Write-Host "   NOT installed - this account has no administrator rights:" -ForegroundColor Yellow
+    Write-Host "   RECOMMENDED, but NOT installed - this account has no administrator rights:" -ForegroundColor Yellow
     foreach ($s in $script:toolsSkipped) {
         Write-Host ("     {0,-14} {1}" -f $s.Name, $s.Url) -ForegroundColor Yellow
     }
     Write-Host ""
-    Write-Host "   THIS IS NOT A PROBLEM, and nothing above was left half-done." -ForegroundColor Cyan
-    Write-Host "   Everything this workstation actually uses is installed. Those are a"
-    Write-Host "   Windows Explorer add-on and the runtime it needs; git itself is here and"
-    Write-Host "   every tool, script and editor integration uses git, not them."
+    Write-Host "   NOTHING IS BROKEN, and nothing above was left half-done." -ForegroundColor Cyan
+    Write-Host "   Everything this workstation actually uses is installed and working."
+    Write-Host "   TortoiseGit is the graphical way to use git from Windows Explorer, and the"
+    Write-Host "   two VC++ runtimes are the prerequisite it names. They are worth having, and"
+    Write-Host "   nothing here depends on them - git itself does not."
     Write-Host ""
-    Write-Host "   If you want them anyway, either is fine:"
-    Write-Host "     - run this script again from a PowerShell started with 'Run as"
-    Write-Host "       administrator', and it will pick up only what is missing; or"
-    Write-Host "     - ask whoever administers this machine to install them from the"
-    Write-Host "       addresses above. Nothing else has to be redone afterwards."
+    Write-Host "   To get them, ask whoever administers this machine to install them from the"
+    Write-Host "   addresses above - once, and nothing here has to be redone afterwards. Or run"
+    Write-Host "   this script again from a PowerShell started with 'Run as administrator', and"
+    Write-Host "   it will pick up only what is missing."
 }
 else {
     Write-Host "   nothing was skipped." -ForegroundColor Green
