@@ -2292,7 +2292,10 @@ if (-not $SkipDeps) {
         # have answered a question that could not be honoured.
         $cand = Select-PortableCandidate $gateBlockers
 
-        if ($cand.Offerable -and (-not $CheckOnly)) {
+        # The offer is EXPLAINED only when there is still a question to answer. Printing
+        # "you do not have to stop here" and then "STOPPING" three lines later, to somebody
+        # who passed -Portable no and already knew, reads as the script arguing with itself.
+        if ($cand.Offerable -and (-not $CheckOnly) -and ($Portable -eq 'ask')) {
             Write-Host "   But you do not have to stop here." -ForegroundColor Cyan
             Write-Host ""
             Write-Host "   Both of those also ship as a plain archive that needs NO rights at all."
