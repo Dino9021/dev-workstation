@@ -4,6 +4,32 @@
 
 One command turns a bare Windows host into a working Claude Code development environment.
 
+## 安裝 / Install
+
+開一個 PowerShell 視窗，貼上這一行。有系統管理員帳號的話，用「以系統管理員身分執行」開。
+沒有也可以照貼——腳本會問你要不要改用免安裝的可攜版。
+
+Open a PowerShell window and paste this one line. With an administrator account, open it
+with "Run as administrator"; without one, paste it as you are and the script will ask
+whether to use portable copies instead.
+
+```powershell
+$u='https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1'; $f="$env:TEMP\install.ps1"; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest $u -OutFile $f -UseBasicParsing; powershell -ExecutionPolicy Bypass -File $f
+```
+
+完全不互動 / fully unattended:
+
+```powershell
+$u='https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1'; $f="$env:TEMP\install.ps1"; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest $u -OutFile $f -UseBasicParsing; powershell -ExecutionPolicy Bypass -File $f -Portable yes -Cowork no
+```
+
+⛔ 不要用 `irm ... | iex`：腳本裝好 PowerShell 7 之後要用 `-File $PSCommandPath` 重新啟動自己
+交棒過去，而管線進 `iex` 的腳本沒有自己的路徑。它**必須**先落成檔案。詳見「第一次安裝」。
+
+⛔ Do not use `irm ... | iex`: the script relaunches itself with `-File $PSCommandPath` to
+hand over to PowerShell 7, and a script piped into `iex` has no path of its own. It **must**
+land on disk first. See "First install".
+
 ---
 
 # 正體中文
@@ -197,7 +223,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 
 ### 安裝順序
 
-1. **PowerShell 7**——先裝它，然後整支腳本重新在它底下執行。只下載了 `install.ps1` 單檔時，接著**先裝 Git for Windows、再 clone repo**，然後交棒給 clone 裡的那份
+1. **PowerShell 7**——先裝它，然後整支腳本重新在它底下執行。只下載了 `install.ps1` 單檔時，接著**先裝 Git for Windows、再 clone repo**，然後交棒給 clone 裡的那份。⚠ 沒有管理員權限時，它會先問要不要改用可攜版的 PowerShell 7 與 Node.js；答 `Y` 就解到 `~\AppData\Local\Programs\dev-workstation\` 並交棒給那份 pwsh，答 `N` 就停下來
 2. **工具鏈**——依序檢查並只補缺的：`git`、**VS Code**（使用者版，裝在 `~\AppData\Local`，不需要系統管理員）、**Microsoft Visual C++ Redistributable 2015–2022**（x64 與 x86，TortoiseGit 官方 FAQ 列的先決條件，所以排在它前面）、**TortoiseGit**、`node`、`python`、`claude`。**完全不使用 winget**：每一項都是直接下載原廠安裝檔靜默安裝。（winget 在 Windows Server 上根本沒有，而在全新的 Windows 11 上雖然有卻是壞的——2026-10-07 實測，三個工具三次都是 `Failed when opening source(s)`，白試一次才退回下載。）`git` 與 `TortoiseGit` 都會先向各自專案的來源問出當前版本，釘住的網址只是最後防線；VS Code 與 VC++ 用的是原廠「永遠指向最新版」的固定網址。⚠ 沒有管理員權限的執行會跳過 **TortoiseGit** 與兩個 **VC++** 執行階段（見「需要系統管理員的項目」B 組），其餘照常安裝
 3. **VS Code 擴充套件**——`anthropic.claude-code`（Claude Code extension），用 VS Code 自己的 `code --install-extension` 安裝
 4. **指令檔**——`Tools/deploy.py` 放置使用者層級的兩份與專案層級的範本
@@ -227,9 +253,19 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo C:\code\my-project
 ```
 
-### 它只會問你一件事
+### 它會問你的兩件事
 
-整個安裝流程只有一個問題：**要不要裝 claude-mem Cowork（`claude-mem-cowork@thedotmack`）**。
+整個安裝流程只有兩個問題，而且兩個都問在最前面。
+
+**一、沒有管理員權限時：要不要用可攜版的 PowerShell 7 與 Node.js？**
+
+這一題**只在真的會卡住的時候才問**：目前這個行程沒有提權，而且那兩項真的缺。有管理員權限、
+或者它們本來就裝好了，都不會問。答 `Y` 就裝進你自己的
+`~\AppData\Local\Programs\dev-workstation\` 並把後續全部跑完；答 `N` 就停下來，並把「絕對
+不能少」跟「建議但可選」兩張清單印給你。用 `-Portable yes` / `-Portable no` 就完全不會問。
+詳見上方「需要系統管理員的項目」。
+
+**二、要不要裝 claude-mem Cowork（`claude-mem-cowork@thedotmack`）？**
 
 它是 claude-mem 的**雲端**那一半。它自己的 marketplace 說明寫著：hooks「stream tool use to cmem.ai and inject observations into new sessions and agents」——也就是**會把你的工具使用紀錄送到外部服務 cmem.ai**。第 5 步裝的本機 claude-mem 不會，也不需要它。所以它不在預設裡。
 
@@ -243,6 +279,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo C:\code\my-project
 ### 它會改動哪些檔案
 
 **這支腳本只擁有一個檔案：它自己的 log。** 其他所有寫入都是它呼叫的子工具做的，而那些子工具各自帶著備份、寫入後檢查與回滾機制。一個檔案有兩個擁有者，就是檔案被覆蓋掉的原因。
+
+⚠ **不過有兩個例外，都是寫在你自己的使用者範圍裡。** 第一，`uv` 與 `claude` 的原廠安裝指令碼會把
+執行檔放在 `~\.local\bin` 卻不幫你加進 PATH，所以這支腳本會替你寫進使用者 PATH。第二，
+答應了可攜版的話，PowerShell 7 與 Node.js 會解到 `~\AppData\Local\Programs\dev-workstation\`，
+同樣加進使用者 PATH。兩者都只影響你這個帳號：沒有機器範圍的寫入、沒有 `HKLM`，別人登入這台
+機器不會看到。要移除就是把資料夾刪掉、再從使用者 PATH 把那一項拿掉；腳本本身不提供反安裝。
 
 每次執行都會完整記錄到腳本旁邊的 `Debug\install-<時間戳>.log`，而且**絕對路徑會在開頭印一次、在每一個結束點再印一次，包含每一種失敗情況**。
 
@@ -563,6 +605,9 @@ to it.
 1. **PowerShell 7** — first, then the whole script relaunches under it. When
    `install.ps1` was downloaded on its own, it then **installs Git for Windows, clones the
    repository**, and hands over to the clone's copy
+   ⚠ Without administrator rights it asks first whether to use portable copies of
+   PowerShell 7 and Node.js; `Y` expands them into
+   `~\AppData\Local\Programs\dev-workstation\` and hands over to that pwsh, `N` stops
 2. **Toolchain** — checked first and installed only when missing, in this order:
    `git`, **VS Code** (the per-user install, under `~\AppData\Local`, no administrator
    needed), the **Microsoft Visual C++ Redistributable 2015–2022** (x64 and x86 — the
@@ -615,10 +660,21 @@ actually want to work in. Name it explicitly:
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo C:\code\my-project
 ```
 
-### The one question it asks
+### The two questions it asks
 
-The whole install asks exactly one thing: **install claude-mem Cowork
-(`claude-mem-cowork@thedotmack`) or not?**
+The whole install asks exactly two things, and both come at the very start.
+
+**1. Without administrator rights: use portable copies of PowerShell 7 and Node.js?**
+
+This one is asked **only when it would otherwise be a dead end** — this process is not
+elevated and those two are genuinely missing. With administrator rights, or with them
+already installed, it is never asked. Answer `Y` and they go into your own
+`~\AppData\Local\Programs\dev-workstation\` and the run finishes; answer `N` and it
+stops, printing the strictly-required and the recommended-but-optional lists separately.
+`-Portable yes` / `-Portable no` skips the question. See "What needs an administrator"
+above.
+
+**2. Install claude-mem Cowork (`claude-mem-cowork@thedotmack`) or not?**
 
 It is the **cloud** half of claude-mem. Its own marketplace entry says its hooks "stream
 tool use to cmem.ai and inject observations into new sessions and agents" — it **sends your
@@ -642,6 +698,15 @@ do and before it installs anything. It does not surface forty minutes in.
 the tools it calls, each of which already carries its own backup, post-write check and
 rollback. Two owners for one file is how a file gets clobbered by the owner that lost
 track.
+
+⚠ **Two exceptions, and both land inside your own user scope.** First, the vendor install
+scripts for `uv` and `claude` put their executables in `~\.local\bin` and do NOT add it to
+PATH, so this script writes that entry to the USER PATH for you. Second, if you answered
+yes to the portable question, PowerShell 7 and Node.js are expanded into
+`~\AppData\Local\Programs\dev-workstation\` and that goes on the user PATH too. Both touch
+only your account: nothing machine-wide, nothing in `HKLM`, and nobody else signing in to
+this machine sees them. To undo either, delete the directory and remove its entry from your
+user PATH - the script has no uninstaller.
 
 Every run is transcribed to `Debug\install-<stamp>.log` beside the script, and the
 **absolute path is printed at the top of the run and again on every exit, including every
