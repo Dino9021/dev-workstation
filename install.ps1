@@ -350,7 +350,9 @@ function Test-UpdatableClone {
     $a = $TopLevel.Replace('/', '\').TrimEnd('\')
     $b = $Dir.Replace('/', '\').TrimEnd('\')
     if ($a -ne $b) { return "it sits INSIDE another repository ($a) - pulling would update that one, not this" }
-    if ($Porcelain) { return 'the working tree has uncommitted changes' }
+    # ⚠ TRACKED modifications only - the caller asks git with --untracked-files=no, because
+    # a finished install always leaves untracked files in its own clone. See Update-OwnClone.
+    if ($Porcelain) { return 'tracked files in the working tree have uncommitted changes' }
     return $null
 }
 
@@ -745,7 +747,18 @@ function Update-OwnClone {
     # Measured separately, then handed to the pure test, so the decision is reviewable and
     # the self-test can drive it without a repository.
     $top = (& git -C $Dir rev-parse --show-toplevel 2>$null | Select-Object -First 1)
-    $porcelain = (& git -C $Dir status --porcelain 2>$null | Out-String).Trim()
+    # ⛔ --untracked-files=no, AND THAT IS THE WHOLE DIFFERENCE BETWEEN THIS WORKING AND NOT.
+    # A completed install LEAVES untracked files in its own clone - measured on the test VM
+    # 2026-10-14: .gitnexus/ (the index), CLAUDE.md (deploy.py's project template) and
+    # Debug/ (THIS SCRIPT'S OWN LOG). Counting those as "uncommitted changes" meant the
+    # self-update worked once and then refused for ever on every machine that had finished
+    # an install - silently degrading the one promise it exists for.
+    #
+    # They are also not the hazard the clean-tree rule was written for. That was a tracked
+    # file being REWRITTEN half way; an untracked file cannot be rewritten by a
+    # fast-forward, and where one would genuinely be overwritten git refuses by itself and
+    # says so - which this function already reports and carries on from.
+    $porcelain = (& git -C $Dir status --porcelain --untracked-files=no 2>$null | Out-String).Trim()
     $why = Test-UpdatableClone -Dir $Dir -TopLevel ([string] $top) -Porcelain $porcelain
     if ($why) {
         $script:updateNote = "skipped - $why"
@@ -2602,8 +2615,20 @@ function Invoke-SelfTest {
     # file held open by another process let git rewrite the others and then fail, leaving a
     # tree that refused every later pull; and a dirty-but-non-conflicting tree
     # fast-forwards quite happily, which moves files under whoever is editing them.
-    Check 'update: an uncommitted change stops the pull' (
+    Check 'update: an uncommitted change to a TRACKED file stops the pull' (
         (Test-UpdatableClone -Dir 'C:\WorkSpace\dev-workstation' -TopLevel 'C:/WorkSpace/dev-workstation' -Porcelain ' M install.ps1') -match 'uncommitted')
+    # ⛔ THE LOOKALIKE THAT COST THE FEATURE ITS POINT. A finished install leaves
+    # untracked files in its own clone - measured on the VM: .gitnexus/, CLAUDE.md and
+    # Debug/, this script's own log directory. Treating those as uncommitted changes
+    # meant the update worked once and then refused for ever. The caller asks git with
+    # --untracked-files=no, so they never reach this function; an EMPTY porcelain is
+    # what a clone full of untracked install output looks like, and it must pass.
+    Check 'update: a clone full of UNTRACKED install output is still updatable' (
+        $null -eq (Test-UpdatableClone -Dir 'C:\WorkSpace\dev-workstation' -TopLevel 'C:/WorkSpace/dev-workstation' -Porcelain ''))
+    # And the call site really does ask git to leave them out - a source check, because
+    # the flag lives in Update-OwnClone where no offline case can execute it.
+    Check 'update: the status call passes --untracked-files=no' (
+        $ownText -match 'status --porcelain --untracked-files=no')
     # Order matters: a dirty copy inside another repository must report the ENCLOSING
     # repository, because that is the dangerous half.
     Check 'update: enclosing-repository beats dirty in the message' (
