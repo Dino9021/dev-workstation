@@ -771,7 +771,16 @@ function Update-OwnClone {
             foreach ($line in ($porcelain -split "`r?`n" | Select-Object -First 10)) {
                 Write-Host "     $line"
             }
-            Write-Host "   commit or discard those, or pass -NoUpdate to stop asking." -ForegroundColor Yellow
+            # THE COMMAND, not the advice. "Commit or discard those" is a sentence somebody
+            # has to translate before they can act on it, and the commonest case here needs
+            # no judgement at all: a machine installed before the published .gitignore
+            # carried the installer's own rules has a locally modified .gitignore that
+            # nobody chose - Tools/deploy.py appended to it. Discarding that is right, and
+            # the line below is what does it.
+            Write-Host "   To let it update: commit those, or discard them with" -ForegroundColor Yellow
+            Write-Host "     git -C `"$Dir`" checkout -- ." -ForegroundColor Yellow
+            Write-Host "   That throws away uncommitted edits to the files listed above, so read" -ForegroundColor Yellow
+            Write-Host "   the list first. -NoUpdate stops it asking at all." -ForegroundColor Yellow
         }
         return 'skipped'
     }
