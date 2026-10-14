@@ -140,6 +140,14 @@ param(
     # -NoUpdate is for the cases where pulling is still wrong: a developer testing an
     # uncommitted change, a pinned deployment, and this repository's own working tree when
     # more than one session is editing it.
+    # Which drive the WorkSpace folder is created on, when this file was downloaded alone
+    # and has to clone the repository somewhere (owner, 2026-10-14). A bare letter: -Drive D.
+    # 'D:' and 'D:\' are accepted too, because that is what people type.
+    #
+    # Left out, an interactive run ASKS, listing only the drives this account can actually
+    # create a folder on - and a run that cannot ask (redirected stdin, -CheckOnly, a
+    # timeout) takes C, or the first writable drive when C is not one.
+    [string] $Drive = '',
     [switch] $NoUpdate,
     [switch] $SelfTest,
     # Probes the pinned download URLs with a HEAD request and installs nothing.
@@ -232,6 +240,83 @@ function Test-IsClone {
     # test, not .git: a ZIP download has no .git and is a perfectly good copy.
     param([string] $Dir)
     return (Test-Path -LiteralPath (Join-Path $Dir 'Tools\deploy.py'))
+}
+
+function Get-WritableDrive {
+    <#
+      Which drive letters can this account actually create a folder on?
+
+      ⛔ IT CREATES ONE AND DELETES IT. Reading the ACL, or trusting DriveType, is a guess -
+      and the case that matters most is the one a guess gets wrong: a standard user on a
+      fixed disk whose root they may not write. The probe answers for the account that is
+      running, which is the only account whose answer counts.
+
+      [IO.DriveInfo], not Win32_LogicalDisk: no WMI dependency, and measured to give the
+      same answer under Windows PowerShell 5.1 and 7.6.6 - which matters, because a fresh
+      host reaches this code under 5.1.
+
+      Measured on this host: C, D, E (Fixed) all writable; Z (CDRom) fails the probe with
+      "The device is not ready", so the instrument discriminates rather than passing
+      everything.
+    #>
+    $found = @()
+    foreach ($d in [IO.DriveInfo]::GetDrives()) {
+        if (-not $d.IsReady) { continue }
+        # Removable and network drives are not offered: a workstation whose repository
+        # lives on a stick that gets unplugged, or a share that is not mounted at logon,
+        # is a workstation that breaks later and blames something else.
+        if ($d.DriveType -ne 'Fixed') { continue }
+        $root = $d.Name                      # 'C:\'
+        $probe = Join-Path $root ('ws-write-probe-' + [Guid]::NewGuid().ToString('N'))
+        $ok = $false
+        try {
+            New-Item -ItemType Directory -Path $probe -ErrorAction Stop | Out-Null
+            $ok = $true
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        }
+        catch { $ok = $false }
+        if (-not $ok) { continue }
+        $freeGb = 0
+        try { $freeGb = [math]::Round($d.AvailableFreeSpace / 1GB, 1) } catch { $freeGb = 0 }
+        $found += [pscustomobject]@{
+            Letter = $root.Substring(0, 1).ToUpperInvariant()
+            FreeGB = $freeGb
+            Label  = [string] $d.VolumeLabel
+        }
+    }
+    return ,@($found)
+}
+
+function Resolve-WorkspaceRoot {
+    <#
+      Turn a drive letter and the list of writable letters into the workspace root.
+
+      PURE - it takes the candidates rather than probing - so -SelfTest drives every branch
+      on a machine with any drive layout at all. Returns a hashtable: Root, or Reason when
+      the letter cannot be used.
+
+      An empty $Letter means "nobody chose": the default is C when C is writable, and
+      otherwise the first writable drive there is. A machine where the user cannot write C
+      is exactly the standard-user case this project spent a week on, and refusing there
+      would be a refusal for the wrong reason.
+    #>
+    param([string] $Letter, $Candidates)
+    $letters = @(@($Candidates) | ForEach-Object { $_.Letter })
+    if ($letters.Count -eq 0) {
+        return @{ Root = $null; Reason = 'no drive on this machine accepts a new folder at its root' }
+    }
+    $want = ''
+    if ($Letter) { $want = $Letter.Trim().TrimEnd(':', '\').ToUpperInvariant() }
+    if ($want.Length -gt 1) {
+        return @{ Root = $null; Reason = "'$Letter' is not a single drive letter" }
+    }
+    if (-not $want) {
+        $want = $(if ($letters -contains 'C') { 'C' } else { $letters[0] })
+    }
+    elseif ($letters -notcontains $want) {
+        return @{ Root = $null; Reason = "drive $want is not one this account can create a folder on ($($letters -join ', '))" }
+    }
+    return @{ Root = "$want`:\WorkSpace"; Reason = $null }
 }
 
 function Test-UpdatableClone {
@@ -778,6 +863,73 @@ function ConvertTo-YesNo {
     return $null
 }
 
+function Read-DriveChoice {
+    <#
+      Ask which drive, once, and return a letter. Never returns empty: it falls back to
+      $Default on anything it cannot read.
+
+      The same three measured constraints as the Y/N question, for the same reasons: with
+      stdin redirected $Host.UI.RawUI.KeyAvailable does NOT throw, it returns $false for
+      ever, so a scripted run would stall for the whole countdown and then carry on anyway;
+      the buffer is flushed first, because a key sent before the loop started was once read
+      0.2s into it and taken as the answer; and a host with no readable key queue blocks on
+      Read-Host instead of guessing.
+    #>
+    param($Candidates, [string] $Default, [int] $Seconds = 30)
+
+    $letters = @(@($Candidates) | ForEach-Object { $_.Letter })
+    Write-Host ""
+    Write-Host "   Which drive should WorkSpace be created on?" -ForegroundColor Cyan
+    foreach ($c in @($Candidates)) {
+        $mark = $(if ($c.Letter -eq $Default) { '*' } else { ' ' })
+        $label = $(if ($c.Label) { "  $($c.Label)" } else { '' })
+        Write-Host ("    {0} [{1}]  {2,8} GB free{3}" -f $mark, $c.Letter, $c.FreeGB, $label)
+    }
+    Write-Host "   (only drives this account can actually create a folder on are listed)"
+
+    if ([Console]::IsInputRedirected) {
+        Write-Host "   stdin is not a terminal, so there is nobody to ask: using $Default." -ForegroundColor Yellow
+        Write-Host "   Pass -Drive <letter> to choose in an unattended run."
+        return $Default
+    }
+    try { $Host.UI.RawUI.FlushInputBuffer() } catch { }
+
+    $timed = $true
+    try { $null = $Host.UI.RawUI.KeyAvailable } catch { $timed = $false }
+    if (-not $timed) {
+        while ($true) {
+            $typed = Read-Host "   drive letter (empty = $Default)"
+            if ($typed.Trim() -eq '') { return $Default }
+            $pick = $typed.Trim().Substring(0, 1).ToUpperInvariant()
+            if ($letters -contains $pick) { return $pick }
+            Write-Host "   $pick is not on the list." -ForegroundColor Yellow
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($Host.UI.RawUI.KeyAvailable) {
+            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            $ch = ([string] $key.Character).ToUpperInvariant()
+            if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 27) {
+                Write-Host "`r   using $Default                                                  " -ForegroundColor Green
+                return $Default
+            }
+            if ($letters -contains $ch) {
+                Write-Host "`r   $ch - WorkSpace will be created on $ch`:                        " -ForegroundColor Yellow
+                return $ch
+            }
+        }
+        else {
+            $left = [int] [Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+            Write-Host ("`r   press a letter - {0,2}s left, and no answer means {1} ... " -f $left, $Default) -NoNewline
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    Write-Host "`r   no answer in $Seconds seconds - using $Default.                   " -ForegroundColor Green
+    return $Default
+}
+
 function Read-YesNoAnswer {
     <#
       Asks once, at the start of the run, and returns 'yes' or 'no' - never 'ask'.
@@ -1255,6 +1407,10 @@ $REPO_URL = 'https://github.com/Dino9021/dev-workstation.git'
 # "create folders", and a folder created there inherits Authenticated Users:Modify -
 # so the non-administrator install the owner wants to test next can both make this
 # directory and write inside it.
+#
+# ⚠ THE DEFAULT, NOT A CONSTANT, since 2026-10-14. An interactive run that is about to
+# clone asks which drive to use and reassigns this - see the drive question below. C stays
+# the answer for every run that cannot ask, and for anyone who just presses Enter.
 $WORKSPACE_ROOT = 'C:\WorkSpace'
 
 # ⛔ EXECUTABLES GO IN THE USER'S OWN PROFILE, AND THAT IS A NAMED EXCEPTION TO THE
@@ -1809,9 +1965,39 @@ function Invoke-SelfTest {
     Check 'bootstrap: the clone URL is the public https copy' ($REPO_URL -like 'https://*')
     # The owner's rule: directories this script creates go under one named root, not
     # beside wherever install.ps1 was downloaded to.
-    Check 'bootstrap: the workspace root is the owner''s C:\WorkSpace' ($WORKSPACE_ROOT -eq 'C:\WorkSpace')
+    # ⚠ THE DEFAULT, not a constant, since the owner asked for a drive choice on
+    # 2026-10-14. C is still what every run that cannot ask gets, and what Enter gets.
+    Check 'bootstrap: the workspace root DEFAULTS to the owner''s C:\WorkSpace' ($WORKSPACE_ROOT -eq 'C:\WorkSpace')
     Check 'bootstrap: the clone lands INSIDE that root' `
           ((Join-Path $WORKSPACE_ROOT 'dev-workstation') -eq 'C:\WorkSpace\dev-workstation')
+
+    # -------------------------------------------- which drive (owner, 2026-10-14)
+    # Resolve-WorkspaceRoot is pure and takes the candidate list, so every branch runs
+    # here whatever drives this machine happens to have.
+    $drvC = [pscustomobject]@{ Letter = 'C'; FreeGB = 118; Label = '' }
+    $drvD = [pscustomobject]@{ Letter = 'D'; FreeGB = 735; Label = 'Data' }
+    $drvE = [pscustomobject]@{ Letter = 'E'; FreeGB = 1664; Label = 'StoragePool' }
+    $all3 = @($drvC, $drvD, $drvE)
+
+    Check 'drive: nobody chose and C is writable -> C' ((Resolve-WorkspaceRoot '' $all3).Root -eq 'C:\WorkSpace')
+    # ⛔ THE CASE THIS PROJECT SPENT A WEEK ON: a machine where the user cannot write C.
+    # Refusing there would refuse for the wrong reason.
+    Check 'drive: nobody chose and C is NOT writable -> the first that is' (
+        (Resolve-WorkspaceRoot '' @($drvD, $drvE)).Root -eq 'D:\WorkSpace')
+    Check 'drive: an explicit letter is honoured' ((Resolve-WorkspaceRoot 'E' $all3).Root -eq 'E:\WorkSpace')
+    # What people actually type.
+    Check 'drive: D: and D\ mean D' (
+        ((Resolve-WorkspaceRoot 'D:' $all3).Root -eq 'D:\WorkSpace') -and
+        ((Resolve-WorkspaceRoot 'd:' $all3).Root -eq 'D:\WorkSpace'))
+    # ⛔ THE LOOKALIKE: a letter that exists but that this account cannot write is NOT a
+    # valid answer, and the refusal has to name the ones that are.
+    $bad = Resolve-WorkspaceRoot 'E' @($drvC, $drvD)
+    Check 'drive: a letter that is not writable is refused' ($null -eq $bad.Root)
+    Check 'drive: and the refusal lists the ones that are' ($bad.Reason -match 'C, D')
+    Check 'drive: a word is not a drive letter' ($null -eq (Resolve-WorkspaceRoot 'data' $all3).Root)
+    Check 'drive: no writable drive at all is refused, with a reason' (
+        ($null -eq (Resolve-WorkspaceRoot '' @()).Root) -and
+        ((Resolve-WorkspaceRoot '' @()).Reason -match 'no drive'))
     # THE LOOKALIKE: the old behaviour was "beside this file", and a Downloads folder
     # is exactly where that put a repository nobody would find again.
     Check 'bootstrap: the clone is NOT beside the script' `
@@ -2602,6 +2788,32 @@ if (-not $SkipDeps) {
             }
         }
     }
+}
+
+# ------------------------------------------------------------- which drive (2026-10-14)
+# ⛔ ONLY WHEN A CLONE IS ACTUALLY GOING TO HAPPEN. $WORKSPACE_ROOT is used for exactly one
+# thing - where the bootstrap puts the repository - so a run started from inside a clone
+# has nothing to decide and is not asked. Asking anyway would be a question with no
+# consequence, which teaches people to press Enter without reading.
+#
+# Before the plan block below, so the plan can print the real path rather than a guess.
+if (-not (Test-IsClone $here)) {
+    $driveCandidates = Get-WritableDrive
+    $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
+    if (-not $resolved.Root) {
+        Write-Host ""
+        Write-Host "Cannot choose where to put WorkSpace: $($resolved.Reason)" -ForegroundColor Red
+        Stop-Run 1
+    }
+    $defaultLetter = $resolved.Root.Substring(0, 1)
+    # Asked only when nobody has answered and there is more than one answer to give. One
+    # writable drive is not a choice, and -CheckOnly writes nothing so it may not create
+    # anything either - both take the default and say so.
+    if ((-not $Drive) -and (-not $CheckOnly) -and (@($driveCandidates).Count -gt 1)) {
+        $Drive = Read-DriveChoice -Candidates $driveCandidates -Default $defaultLetter
+        $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
+    }
+    $WORKSPACE_ROOT = $resolved.Root
 }
 
 # --------------------------------------------------- the plan, and the one question
