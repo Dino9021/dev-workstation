@@ -1085,6 +1085,10 @@ $script:toolsSkipped = @()
 # Named separately because the summary has to say so: they are this account's tools, not
 # the machine's, and nobody else signing in will see them.
 $script:toolsPortable = @()
+# Rows whose installer said "done, but Windows wants a restart" (3010). They are installed;
+# they are not necessarily USABLE yet, and their probe may not see them until the reboot.
+# Kept so the re-check does not read a pending restart as a failed install.
+$script:toolsRestartPending = @()
 # What the self-update did, for the end-of-run summary. A line printed at the top of a
 # forty-minute run is a line nobody reads.
 $script:updateNote = $null
@@ -1775,7 +1779,15 @@ function Install-Dependency {
             throw "$($Dep.Name): dism exited $($proc.ExitCode)"
         }
         if ($proc.ExitCode -eq 3010) {
+            # ⛔ RECORDED, NOT JUST PRINTED. Measured on the test VM 2026-10-14: enabling
+            # TelnetClient with /NoRestart answers 3010, the feature reads Enabled, and
+            # `telnet -?` STILL PRODUCES NOTHING until the machine restarts. So the probe
+            # for this row can legitimately disagree with "it installed" for a while - and
+            # without this, phase 2's re-check would call that STILL MISSING and stop an
+            # otherwise successful elevated run over a convenience tool Windows merely
+            # wants a reboot for.
             Write-Host "   enabled - Windows wants a restart before it works" -ForegroundColor Yellow
+            $script:toolsRestartPending += $Dep.Name
         }
         return
     }
@@ -2227,6 +2239,29 @@ function Invoke-SelfTest {
     # a different line from the call. Without this the scan could be forbidding everything.
     $allowed = ('$a = Get-Missing' + "Dependency `$DEPS`r`n") + '$b = @($a | Where-Object { $true })'
     Check 'missing-set: and it does NOT fire on the correct two-line shape' (-not [regex]::IsMatch($allowed, $pat))
+
+    # ⛔ A RESTART-PENDING ROW IS NOT A FAILED ONE. Measured on the test VM 2026-10-14:
+    # dism enabling TelnetClient with /NoRestart answers 3010, the feature then reads
+    # Enabled, and `telnet -?` still produces nothing until the machine restarts - so the
+    # file probe can disagree with "it installed" for a while. Without the exclusion,
+    # phase 2's re-check calls that STILL MISSING and stops an otherwise successful
+    # elevated run over a convenience tool Windows merely wants a reboot for.
+    $fakeStill = @(@{ Name = 'telnet' }, @{ Name = 'putty' }, @{ Name = 'node' })
+    $fakeSkip = @('putty')
+    $fakePending = @('telnet')
+    $leftOver = @($fakeStill | Where-Object {
+        ($fakeSkip -notcontains $_.Name) -and ($fakePending -notcontains $_.Name)
+    })
+    Check 'restart-pending: a 3010 row does not count as still missing' (
+        ($leftOver.Count -eq 1) -and ($leftOver[0].Name -eq 'node'))
+    # ⛔ THE LOOKALIKE: the exclusion must not swallow a row that genuinely failed. Without
+    # this, widening it to "ignore everything" would still pass the case above.
+    $leftOver2 = @(@(@{ Name = 'node' }) | Where-Object {
+        ($fakeSkip -notcontains $_.Name) -and ($fakePending -notcontains $_.Name)
+    })
+    Check 'restart-pending: and a row that is neither skipped nor pending still counts' ($leftOver2.Count -eq 1)
+    # 3010 has to be a SUCCESS for the installer branch to reach the pending list at all.
+    Check 'restart-pending: 3010 is a successful installer exit' (Test-InstallExit 3010)
 
     # A dependency with no install route can only ever be reported as missing.
     $unreachable = @($DEPS | Where-Object { (-not $_.Url) -and (-not $_.Script) })
@@ -3379,6 +3414,7 @@ if ($missing.Count -gt 0) {
             # read as STILL MISSING right after installing perfectly well.
             if (Test-DependencyPresent $d) { Write-Host ("   {0,-12} OK" -f $d.Name) -ForegroundColor Green }
             elseif ($skipNames -contains $d.Name) { Write-Host ("   {0,-12} skipped - needs an administrator" -f $d.Name) -ForegroundColor Yellow }
+            elseif ($script:toolsRestartPending -contains $d.Name) { Write-Host ("   {0,-12} installed - needs a RESTART before it works" -f $d.Name) -ForegroundColor Yellow }
             else { Write-Host ("   {0,-12} STILL MISSING" -f $d.Name) -ForegroundColor Red }
         }
         # A deliberately skipped row is not a failure, so it must not stop the run here -
@@ -3394,7 +3430,9 @@ if ($missing.Count -gt 0) {
         # 2026-10-14; no self-test reached it, because the shape only misbehaves against a
         # genuinely empty missing-set.
         $stillAll = Get-MissingDependency $DEPS
-        $still = @($stillAll | Where-Object { $skipNames -notcontains $_.Name })
+        $still = @($stillAll | Where-Object {
+            ($skipNames -notcontains $_.Name) -and ($script:toolsRestartPending -notcontains $_.Name)
+        })
         if ($still.Count -gt 0) {
             Write-Host ""
             Write-Host "   still missing: $(($still | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Red
@@ -3876,6 +3914,12 @@ Write-Host "   VS Code and its extensions, python, uv and the claude CLI all ins
 Write-Host "   profile of whoever runs this script. If the person who will USE this machine"
 Write-Host "   is a different Windows account, they must run it themselves as well - signed"
 Write-Host "   in as that account. Everything machine-wide is already done and is left alone."
+if ($script:toolsRestartPending.Count -gt 0) {
+    Write-Host ""
+    Write-Host "   installed, but NOT USABLE until this machine restarts:  $($script:toolsRestartPending -join ', ')" -ForegroundColor Yellow
+    Write-Host "   Windows said so itself (installer exit 3010). Nothing else is waiting on"
+    Write-Host "   the restart - the rest of this workstation is working now."
+}
 if ($script:toolsPortable.Count -gt 0) {
     Write-Host ""
     Write-Host "   installed as a PORTABLE copy, in your profile only:  $($script:toolsPortable -join ', ')" -ForegroundColor Cyan
