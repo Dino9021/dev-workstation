@@ -432,7 +432,7 @@ function Test-DependencyPresent {
     # locale-dependent - "State : Enabled" is not what a Chinese or German Windows prints.
     # A file either exists or it does not, in every language and for every account.
     # MEASURED 2026-10-14 with a negative control: TelnetClient Enabled and
-    # System32	elnet.exe present; TFTP Disabled and System32	ftp.exe absent - so the
+    # System32\telnet.exe present; TFTP Disabled and System32\tftp.exe absent - so the
     # probe tracks the feature rather than passing everything.
     if ($Dep.FileProbe) { return (Test-Path -LiteralPath $Dep.FileProbe) }
     # ⛔ pwsh IS ANSWERED BY Get-Pwsh7Path AND NOTHING ELSE, so the gate, phase 1 and phase
@@ -3280,7 +3280,12 @@ foreach ($d in $DEPS) {
     if (Test-DependencyPresent $d) {
         # Say WHERE, when there is a where to say. TortoiseGit has no PATH entry, so
         # its evidence is the registry key, not a resolved command.
-        $where = if ($d.Exe) { (Get-Command $d.Exe -ErrorAction SilentlyContinue).Source } else { $d.RegKey }
+        # A Windows-feature row has neither a command on PATH nor a registry key, so
+        # without the FileProbe branch it printed "telnet present" with an empty column -
+        # measured on the VM. Say WHERE, for every shape of row.
+        $where = if ($d.Exe) { (Get-Command $d.Exe -ErrorAction SilentlyContinue).Source }
+                 elseif ($d.FileProbe) { $d.FileProbe }
+                 else { $d.RegKey }
         Write-Host ("   {0,-12} present  {1}" -f $d.Name, $where) -ForegroundColor Green
         $script:toolsPresent += $d.Name
     }
@@ -3434,7 +3439,7 @@ else {
         # would also accept anthropic.claude-code-extra, which is a different
         # extension. Verified 2026-10-07 against the live list.
         if ($installed -contains $ext) {
-            Write-Host "   $ext already installed - left alone" -ForegroundColor Green
+            Write-Host "   $ext already installed for $env:USERDOMAIN\$env:USERNAME - left alone" -ForegroundColor Green
             continue
         }
         if ($CheckOnly) {
@@ -3444,7 +3449,14 @@ else {
         & $codeCmd --install-extension $ext 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "     $_" }
         # Read the state back rather than trusting the installer's own text.
         $after = @(& $codeCmd --list-extensions 2>&1 | ForEach-Object { "$_".Trim() })
-        if ($after -contains $ext) { Write-Host "   $ext installed" -ForegroundColor Green }
+        if ($after -contains $ext) {
+            # NAME THE ACCOUNT. A VS Code extension lives in that user's own
+            # %USERPROFILE%\.vscode\extensions and nowhere else - measured 2026-10-14 on
+            # the test VM: installed for one account, and the other account on the same
+            # machine had no extensions directory at all and no `code` on its PATH.
+            # Without the account here, "installed" reads as "installed on this machine".
+            Write-Host "   $ext installed for $env:USERDOMAIN\$env:USERNAME" -ForegroundColor Green
+        }
         else {
             $extFailed += $ext
             Write-Host "   $ext did NOT install" -ForegroundColor Red
@@ -3844,6 +3856,26 @@ if ($script:toolsPresent.Count -gt 0) {
 if ($script:toolsInstalled.Count -gt 0) {
     Write-Host "   installed by this run:      $($script:toolsInstalled -join ', ')" -ForegroundColor Green
 }
+# ⛔ THE THING PEOPLE ACTUALLY GET CAUGHT BY, and until 2026-10-14 this script never said
+# it. Half of what it installs is PER-USER, and it lands in the profile of whoever RAN it.
+# Open VS Code afterwards as a different Windows account and there is no VS Code, no
+# extension, no claude, no python - while the run's own output said every one of them was
+# installed, which was true of the account it ran as.
+#
+# ⚠ AND "I ran it as myself" IS NOT ENOUGH. Right-click -> Run as administrator, answering
+# the prompt with a DIFFERENT admin account's credentials, runs the whole script as that
+# account - so everything below lands in the administrator's profile and the person who
+# asked for the workstation gets none of it. UAC elevation of your OWN account is fine.
+#
+# The script cannot fix this by installing into other people's profiles, so it says so.
+$perUser = @($DEPS | Where-Object { -not $_.NeedsAdmin } | ForEach-Object { $_.Name })
+Write-Host ""
+Write-Host "   PER-USER, and they went to $env:USERDOMAIN\$env:USERNAME - nobody else:" -ForegroundColor Cyan
+Write-Host "     $($perUser -join ', ')$(if ($VSCODE_EXTENSIONS.Count) { ', and the VS Code extensions' })"
+Write-Host "   VS Code and its extensions, python, uv and the claude CLI all install into the"
+Write-Host "   profile of whoever runs this script. If the person who will USE this machine"
+Write-Host "   is a different Windows account, they must run it themselves as well - signed"
+Write-Host "   in as that account. Everything machine-wide is already done and is left alone."
 if ($script:toolsPortable.Count -gt 0) {
     Write-Host ""
     Write-Host "   installed as a PORTABLE copy, in your profile only:  $($script:toolsPortable -join ', ')" -ForegroundColor Cyan
