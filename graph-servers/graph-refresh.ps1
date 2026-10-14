@@ -34,6 +34,8 @@ param(
 
 if (-not $Repo) { $Repo = (Get-Location).Path }
 if (-not (Test-Path $Repo)) { exit 0 }
+# Not inside a git work tree (or no git at all): skip - both graphs index a repository and key on its commits.
+if ((& git -C $Repo rev-parse --is-inside-work-tree 2>$null) -ne 'true') { exit 0 }
 
 $logFile = Join-Path $env:TEMP 'claude-graph-refresh.log'
 function Write-Log([string] $Message) {

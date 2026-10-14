@@ -17,6 +17,15 @@ whether to use portable copies instead.
 $u='https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1'; $f="$env:TEMP\install.ps1"; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest $u -OutFile $f -UseBasicParsing; powershell -ExecutionPolicy Bypass -File $f
 ```
 
+⭐ **更新也是同一行，不必記第二個指令。** 它會把最新的 `install.ps1` 抓下來執行，發現
+`C:\WorkSpace\dev-workstation` 已經在了，就先把那份 clone 快轉到最新，再交棒給更新後的那一份
+把該補的都補上。已經裝好的東西不會重裝。
+
+⭐ **The same line is also the update — there is no second command to remember.** It fetches
+the current `install.ps1`, finds the clone already at `C:\WorkSpace\dev-workstation`,
+fast-forwards it, and hands over to the updated copy to fill in whatever is missing. Anything
+already installed is left alone.
+
 完全不互動 / fully unattended:
 
 ```powershell
@@ -243,6 +252,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 | `-SkipDeps` | 不安裝任何缺少的工具，只做設定 |
 | `-LogPath <路徑>` | 改變 log 位置 |
 | `-Cowork yes` / `-Cowork no` | 直接回答「要不要裝 claude-mem Cowork」，腳本就不會問。見下方說明 |
+| `-NoUpdate` | 不要先把這份 clone 快轉到最新。預設會更新；正在測試未提交的改動、或要釘住版本的時候加這個 |
 | `-Portable yes` / `-Portable no` | 直接回答「沒有管理員權限時要不要用可攜版 PowerShell 7 / Node.js」。不給就是問，而「問不到」等於 no |
 | `-SelfTest` | 離線自我測試，不碰任何東西，連 log 都不寫 |
 | `-CheckUrls` | 檢查釘住的下載網址是否還活著 |
@@ -647,6 +657,7 @@ behind `-All`, and that flag is gone. Passing it does nothing and the script say
 | `-SkipDeps` | Install no missing tools; configure only |
 | `-LogPath <path>` | Move the transcript |
 | `-Cowork yes` / `-Cowork no` | Answers the one question up front, so the script does not ask. See below |
+| `-NoUpdate` | Do not fast-forward this clone first. Updating is the default; pass this when testing an uncommitted change, or to pin a version |
 | `-Portable yes` / `-Portable no` | Answers "use portable PowerShell 7 / Node.js when you have no administrator rights?" up front. Left out, it asks, and anything that cannot be asked counts as no |
 | `-SelfTest` | Offline self-test. Touches nothing, not even the log |
 | `-CheckUrls` | Are the pinned download URLs still alive? |

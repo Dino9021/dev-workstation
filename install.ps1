@@ -127,6 +127,20 @@ param(
     # ⛔ THE DEFAULT ON SILENCE IS NO. A redirected stdin or an unanswered countdown stops
     # the run; it does not quietly put a toolchain somewhere the person did not choose.
     [ValidateSet('ask', 'yes', 'no')] [string] $Portable = 'ask',
+    # Bring this clone up to date with origin before installing anything, so that running
+    # install.ps1 IS the whole of "update this workstation" (owner, 2026-10-14). On by
+    # default; -NoUpdate turns it off.
+    #
+    # ⛔ IT REVERSES A DECISION THIS FILE USED TO MAKE THE OTHER WAY, and the old comment at
+    # the bootstrap's "already cloned" branch said why: updating somebody's checkout is not
+    # this script's call. The owner has decided the trade goes the other way. What survives
+    # of that caution is in Update-OwnClone, which refuses on anything but a clean work tree
+    # that is a repository in its own right.
+    #
+    # -NoUpdate is for the cases where pulling is still wrong: a developer testing an
+    # uncommitted change, a pinned deployment, and this repository's own working tree when
+    # more than one session is editing it.
+    [switch] $NoUpdate,
     [switch] $SelfTest,
     # Probes the pinned download URLs with a HEAD request and installs nothing.
     # Separate from -SelfTest on purpose: -SelfTest must stay offline and pure, and
@@ -138,6 +152,17 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $here = $PSScriptRoot
+# ⭐ THIS FILE'S OWN HASH, taken before it can possibly have changed. The self-update step
+# compares against it to find out whether the pull replaced the very script that is running
+# - which this process would not otherwise notice, because PowerShell has already read the
+# whole file and carries on with the copy in memory.
+# ⚠ $PSCommandPath is empty when a script is piped into Invoke-Expression, which is one of
+# the reasons this installer has to be run as a FILE. Guarded so that path degrades to "no
+# idea whether it changed" rather than to an exception.
+$script:ownHashAtStart = $null
+if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+    $script:ownHashAtStart = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+}
 # Read, never written by this script: the two delegates own it.
 $script:settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
 
@@ -207,6 +232,41 @@ function Test-IsClone {
     # test, not .git: a ZIP download has no .git and is a perfectly good copy.
     param([string] $Dir)
     return (Test-Path -LiteralPath (Join-Path $Dir 'Tools\deploy.py'))
+}
+
+function Test-UpdatableClone {
+    <#
+      May this directory be brought up to date with `git pull`, or must it be left alone?
+
+      PURE given its three inputs, which the caller measures - so -SelfTest drives every
+      branch offline. Returns a reason string, or $null when it may be pulled.
+
+      ⛔ THE TOP-LEVEL TEST IS NOT A FORMALITY, AND IT IS THE ONE THAT NEARLY SHIPPED
+      MISSING. Test-IsClone passes a directory that merely CONTAINS Tools\deploy.py - it
+      tests for that file and deliberately not for .git, because a ZIP download has no .git
+      and is still a perfectly good copy. So a directory can be "a clone" by this script's
+      definition and be no git repository at all - at which point `git -C <dir> pull` acts
+      on whatever repository ENCLOSES it. Measured during the review of this change: a
+      .git-less copy sitting inside somebody's project fast-forwarded THE USER'S PROJECT,
+      exit 0, HEAD moved, a colleague's file created. Hence: the work tree's top level must
+      resolve, and must be this very directory.
+
+      ⛔ AND A CLEAN TREE IS A PRECONDITION, not a hope. `--ff-only` does NOT fail closed:
+      measured, with another process holding one tracked file open, git rewrote the other
+      files - the running script among them - then failed at `unable to unlink old`, left
+      HEAD where it was, and afterwards reported upstream's own content as the user's local
+      modification, so every later pull refused for ever. And a dirty-but-NON-conflicting
+      tree fast-forwards quite happily, which on a shared working tree moves files under
+      somebody who is editing them.
+    #>
+    param([string] $Dir, [string] $TopLevel, [string] $Porcelain)
+    if (-not $TopLevel) { return 'it is not a git work tree (a ZIP copy has no .git)' }
+    # Compare as paths, not as strings: git answers with forward slashes.
+    $a = $TopLevel.Replace('/', '\').TrimEnd('\')
+    $b = $Dir.Replace('/', '\').TrimEnd('\')
+    if ($a -ne $b) { return "it sits INSIDE another repository ($a) - pulling would update that one, not this" }
+    if ($Porcelain) { return 'the working tree has uncommitted changes' }
+    return $null
 }
 
 function Test-InstallerPayload {
@@ -565,6 +625,74 @@ function Install-PortableDependency {
     $script:toolsPortable += $Dep.Name
 }
 
+function Update-OwnClone {
+    <#
+      Fast-forward THIS clone to origin, before anything is installed from it.
+
+      Returns one of: 'updated' (HEAD moved), 'current' (already level), 'skipped' (a
+      precondition said no), 'failed' (git said no). The caller decides what each means;
+      this function only ever reports, and $script:updateNote carries the reason for the
+      end-of-run summary - because a line printed here is forty minutes from where anybody
+      reads it.
+
+      ⛔ IT NEVER MERGES, REBASES, STASHES, RESETS OR CLEANS. --ff-only and nothing else.
+      Nothing here may cost a user work; a workstation one version behind is a smaller
+      problem than a working tree somebody has to reconstruct.
+    #>
+    param([string] $Dir)
+
+    if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
+        $script:updateNote = 'skipped - git is not installed yet'
+        Write-Host "   skipped: git is not on this machine yet" -ForegroundColor Yellow
+        return 'skipped'
+    }
+
+    # Measured separately, then handed to the pure test, so the decision is reviewable and
+    # the self-test can drive it without a repository.
+    $top = (& git -C $Dir rev-parse --show-toplevel 2>$null | Select-Object -First 1)
+    $porcelain = (& git -C $Dir status --porcelain 2>$null | Out-String).Trim()
+    $why = Test-UpdatableClone -Dir $Dir -TopLevel ([string] $top) -Porcelain $porcelain
+    if ($why) {
+        $script:updateNote = "skipped - $why"
+        Write-Host "   skipped: $why" -ForegroundColor Yellow
+        if ($porcelain) {
+            # NAME them. On Windows a CRLF rewrite can mark a file modified with an EMPTY
+            # diff, and no amount of update-index clears it - a human reading the list can
+            # see at once that they changed nothing, where a bare "it is dirty" leaves them
+            # hunting. Guessing on their behalf is how work gets destroyed.
+            foreach ($line in ($porcelain -split "`r?`n" | Select-Object -First 10)) {
+                Write-Host "     $line"
+            }
+            Write-Host "   commit or discard those, or pass -NoUpdate to stop asking." -ForegroundColor Yellow
+        }
+        return 'skipped'
+    }
+
+    $before = (& git -C $Dir rev-parse HEAD 2>$null | Select-Object -First 1)
+    Write-Host "   git -C `"$Dir`" pull --ff-only"
+    $out = (& git -C $Dir pull --ff-only 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    foreach ($line in ($out.TrimEnd() -split "`r?`n")) { if ($line) { Write-Host "     $line" } }
+    $after = (& git -C $Dir rev-parse HEAD 2>$null | Select-Object -First 1)
+
+    if ($code -ne 0) {
+        # ⚠ A FAILURE IS NOT ALWAYS HARMLESS, so it is reported rather than swallowed: the
+        # partial-rewrite case above leaves a tree that refuses every later pull, and the
+        # only way anybody finds out is this line and the summary.
+        $script:updateNote = "FAILED - git exited $code; the clone is unchanged. Its own message is in the log."
+        Write-Host "   could not update (git exited $code) - carrying on with this copy as it is." -ForegroundColor Yellow
+        return 'failed'
+    }
+    if ($before -eq $after) {
+        $script:updateNote = 'already up to date'
+        Write-Host "   already up to date" -ForegroundColor Green
+        return 'current'
+    }
+    $script:updateNote = "updated $($before.Substring(0,7)) -> $($after.Substring(0,7))"
+    Write-Host "   updated $($before.Substring(0,7)) -> $($after.Substring(0,7))" -ForegroundColor Green
+    return 'updated'
+}
+
 function Select-SkippableRow {
     <#
       Which MISSING rows does a run without administrator rights simply LEAVE OUT instead
@@ -795,6 +923,9 @@ $script:toolsSkipped = @()
 # Named separately because the summary has to say so: they are this account's tools, not
 # the machine's, and nobody else signing in will see them.
 $script:toolsPortable = @()
+# What the self-update did, for the end-of-run summary. A line printed at the top of a
+# forty-minute run is a line nobody reads.
+$script:updateNote = $null
 
 function Start-RunLog {
     param([string] $Path)
@@ -2051,6 +2182,34 @@ function Invoke-SelfTest {
     Check 'portable: both archive URLs are in the -CheckUrls set' (
         ($urlRows -contains $pwshRowP.Portable.Url) -and ($urlRows -contains $nodeRowP.Portable.Url))
 
+    # -------------------------------------- the self-update preconditions (2026-10-14)
+    # ⛔ THE ONE THAT NEARLY SHIPPED MISSING, and the reason Test-UpdatableClone exists at
+    # all. Test-IsClone passes a directory that merely CONTAINS Tools\deploy.py - it tests
+    # for that file and deliberately not for .git - so a "clone" by this script's definition
+    # can be no git repository of its own, and a pull there acts on whatever ENCLOSES it.
+    # Measured during review: a .git-less copy inside somebody's project fast-forwarded THE
+    # USER'S PROJECT, exit 0, HEAD moved.
+    Check 'update: a directory that is not a work tree is NEVER pulled' (
+        (Test-UpdatableClone -Dir 'C:\x\dev-workstation' -TopLevel '' -Porcelain '') -match 'not a git work tree')
+    Check 'update: a copy INSIDE another repository is never pulled' (
+        (Test-UpdatableClone -Dir 'C:\proj\vendor\dev-workstation' -TopLevel 'C:/proj' -Porcelain '') -match 'INSIDE another repository')
+    # The lookalike: a real clone, whose top level IS itself, must be allowed through.
+    Check 'update: a clone that IS its own work tree is allowed' (
+        $null -eq (Test-UpdatableClone -Dir 'C:\WorkSpace\dev-workstation' -TopLevel 'C:/WorkSpace/dev-workstation' -Porcelain ''))
+    # git answers with forward slashes, and a trailing separator is not a difference.
+    Check 'update: forward slashes and a trailing slash are the same path' (
+        $null -eq (Test-UpdatableClone -Dir 'C:\WorkSpace\dev-workstation\' -TopLevel 'C:/WorkSpace/dev-workstation' -Porcelain ''))
+    # ⛔ A DIRTY TREE IS NEVER PULLED. --ff-only does not fail closed: measured, a tracked
+    # file held open by another process let git rewrite the others and then fail, leaving a
+    # tree that refused every later pull; and a dirty-but-non-conflicting tree
+    # fast-forwards quite happily, which moves files under whoever is editing them.
+    Check 'update: an uncommitted change stops the pull' (
+        (Test-UpdatableClone -Dir 'C:\WorkSpace\dev-workstation' -TopLevel 'C:/WorkSpace/dev-workstation' -Porcelain ' M install.ps1') -match 'uncommitted')
+    # Order matters: a dirty copy inside another repository must report the ENCLOSING
+    # repository, because that is the dangerous half.
+    Check 'update: enclosing-repository beats dirty in the message' (
+        (Test-UpdatableClone -Dir 'C:\proj\ws' -TopLevel 'C:/proj' -Porcelain ' M a.txt') -match 'INSIDE another repository')
+
     # ---------------------------------------------- the exit-code hints
     Check 'hint: 1601 says administrator' ((Get-InstallExitHint 1601) -match 'administrator')
     Check 'hint: 5 says administrator' ((Get-InstallExitHint 5) -match 'administrator')
@@ -2224,6 +2383,56 @@ if (@($args | Where-Object { "$_" -match '^-+all$' }).Count -gt 0) {
     Write-Host "NOTE: -All no longer exists, and it was ignored." -ForegroundColor Yellow
     Write-Host "      It used to gate dispatch-guard. dispatch-guard and mattpocock-skills" -ForegroundColor Yellow
     Write-Host "      are now installed by default, so there is nothing left for it to turn on." -ForegroundColor Yellow
+}
+
+# ------------------------------------------------------------- update this clone first
+# Owner, 2026-10-14: 讓使用者只要執行 install.ps1 就可以全自動更新. Before anything is
+# installed FROM this copy, bring the copy itself up to date - otherwise "run install.ps1
+# again" installs yesterday's workstation and the user has no way to tell.
+#
+# Only the in-clone run gets here; the bootstrap path has its own call, because there the
+# clone is somewhere else and git may not exist yet.
+if ((-not $NoUpdate) -and (Test-IsClone $here)) {
+    if ($CheckOnly) {
+        # ⛔ NO FETCH. The file header promises -CheckOnly writes "exactly one thing - this
+        # log - and nothing else", and `git fetch` writes into .git (13 paths, measured).
+        # Counting how far behind without writing is not possible, and answering from a
+        # stale clone is worse than not answering: measured, it said 0 behind while 1
+        # behind. So it says what a real run would do, and says what it cannot know.
+        Write-Phase "Update"
+        Write-Host "   CHECK ONLY: a real run would fast-forward this clone first" -ForegroundColor Yellow
+        Write-Host "     git -C `"$here`" pull --ff-only"
+        Write-Host "   How far behind it is cannot be known without a fetch, and a fetch writes" -ForegroundColor Yellow
+        Write-Host "   inside .git - which this mode does not do." -ForegroundColor Yellow
+    }
+    else {
+        Write-Phase "Update"
+        $updated = Update-OwnClone $here
+        if ($updated -eq 'updated') {
+            # ⛔ THE SCRIPT MAY HAVE JUST REPLACED ITSELF, AND THIS PROCESS IS STILL HOLDING
+            # THE OLD ONE. Measured on both editions: a PowerShell script overwritten
+            # mid-run carries on executing its ORIGINAL body to the end - longer
+            # replacement, shorter, delete-and-recreate, and a real `git pull` alike. So
+            # carrying on would orchestrate a NEW tree with OLD logic.
+            #
+            # ⚠ AND IT DOES NOT RE-EXECUTE ITSELF. That was the first design and review
+            # killed it: a literal same-command-line relaunch asks the Cowork question a
+            # SECOND time when the run began under pwsh 7, and with the loop sentinel
+            # removed the prototype reached 118 processes that a timeout did not stop.
+            # Stopping and asking for one more run is cheaper and, measured, at least equal.
+            $nowHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+            if ($nowHash -ne $script:ownHashAtStart) {
+                Write-Host ""
+                Write-Host "   install.ps1 ITSELF was updated by that pull." -ForegroundColor Cyan
+                Write-Host "   This process is still running the old copy, so it stops here rather than"
+                Write-Host "   setting your machine up with a mixture of the two."
+                Write-Host ""
+                Write-Host "   Nothing was installed. Run the same command again:" -ForegroundColor Cyan
+                Write-Host "     powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+                Stop-Run 0
+            }
+        }
+    }
 }
 
 # --------------------------------------------------------- the administrator gate
@@ -2545,10 +2754,25 @@ if (-not (Test-IsClone $here)) {
     }
 
     if ($haveClone) {
-        # Used as it is, never pulled: updating somebody's checkout is not this
-        # script's call, and a re-run must not change what it already set up.
-        Write-Host "   already cloned - using it as it is, NOT updating it: $clone" -ForegroundColor Green
-        Write-Host "   (to update it first:  git -C `"$clone`" pull)"
+        # ⭐ REVERSED 2026-10-14, on the owner's decision. This branch used to read "used as
+        # it is, never pulled: updating somebody's checkout is not this script's call", and
+        # printed the pull command for the user to run themselves. The owner asked that
+        # running install.ps1 BE the update, so it is done here - but only under
+        # Update-OwnClone, which keeps the whole of that old caution as preconditions: the
+        # directory must be a git work tree in its own right, and the tree must be clean.
+        Write-Host "   already cloned: $clone" -ForegroundColor Green
+        if ($NoUpdate) {
+            Write-Host "   -NoUpdate: using it exactly as it is" -ForegroundColor Yellow
+        }
+        elseif ($CheckOnly) {
+            Write-Host "   CHECK ONLY: a real run would fast-forward it first" -ForegroundColor Yellow
+        }
+        else {
+            # No self-replacement check here, and none is needed: the file THIS process is
+            # running is the downloaded one in TEMP, not the clone's copy. The clone's
+            # install.ps1 is launched fresh below, and it is the updated one.
+            Update-OwnClone $clone | Out-Null
+        }
     }
     elseif (Test-Path -LiteralPath $clone) {
         Write-Host "   $clone exists but is not a copy of this repository." -ForegroundColor Red
@@ -3157,6 +3381,16 @@ if (-not $Pdg) {
 # run ends. What a person needs to read when it finishes is: what have I got, and is
 # anything missing something I should worry about.
 Write-Phase "Summary: what this run did to the toolchain"
+if ($script:updateNote) {
+    # ⚠ REPEATED HERE ON PURPOSE. The update happens in the first seconds of a run that
+    # takes forty minutes; a skip or a failure said only there has scrolled past half a
+    # dozen third-party installers by the time anybody is reading. A workstation that
+    # quietly stopped updating itself and kept reporting success is the failure this line
+    # exists to prevent.
+    $colour = 'Green'
+    if ($script:updateNote -notmatch '^(updated|already up to date)') { $colour = 'Yellow' }
+    Write-Host "   this copy of the project:   $($script:updateNote)" -ForegroundColor $colour
+}
 if ($script:toolsPresent.Count -gt 0) {
     Write-Host "   already there, left alone:  $($script:toolsPresent -join ', ')" -ForegroundColor Green
 }

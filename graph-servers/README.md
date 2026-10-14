@@ -85,6 +85,38 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1                # 機器�
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo <repo-root>   # 專案層級 / per-repo
 ```
 
+### 更新已經裝好的機器 | Updating a machine that is already set up
+
+**不要在這個目錄裡更新。** 跑專案根目錄的 `install.ps1` 就好，它會先把這份 clone 快轉到
+最新，再把這裡的 `install.ps1` 跟 hook 重新放一次：
+
+**Do not update from inside this directory.** Run the project root's `install.ps1`: it
+fast-forwards this clone first, then re-places this directory's `install.ps1` and the hook:
+
+```powershell
+# 從任何地方，一行就是更新 / one line, from anywhere, IS the update
+$u='https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1'; $f="$env:TEMP\install.ps1"; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest $u -OutFile $f -UseBasicParsing; powershell -ExecutionPolicy Bypass -File $f
+
+# 或者，已經有 clone 的話 / or, if you already have the clone
+powershell -ExecutionPolicy Bypass -File C:\WorkSpace\dev-workstation\install.ps1
+```
+
+它會做的事：clone 快轉到最新 → 裝缺的工具（裝過的不動）→ 重跑本目錄的 `install.ps1`，它會比對
+hook 的雜湊、備份舊的、寫入後再驗證一次，不對就回滾。
+
+What it does: fast-forward the clone → install whatever tools are missing (installed ones are
+left alone) → re-run this directory's `install.ps1`, which hashes the hook, backs up the old
+one, writes, verifies, and rolls back if the verification fails.
+
+⚠ **幾種情況下它會跳過更新並告訴你原因**，而不是硬拉：這份拷貝不是獨立的 git work
+tree（例如 ZIP 解出來的，或是被放在別的 repo 裡面），或是工作區有未提交的改動。理由在專案根目錄
+`README.md` 的 `-NoUpdate` 那一欄。
+
+⚠ It SKIPS the update and says why, rather than forcing it, when this copy is not a git work
+tree of its own (a ZIP extract, or a copy sitting inside another repository), or when the
+working tree has uncommitted changes. The reasoning is under `-NoUpdate` in the project
+root's `README.md`.
+
 ### 前置需求檢查 | The prerequisite gate
 
 **缺什麼就擋下來並給你安裝指令。** 五項工具逐一比對版本，狀態分成 `OK` / `TOO OLD` / `MISSING`；只要有一項不合，它**在安裝任何東西之前就停**（exit code 1），並印出每一項的 `winget install` 指令與官方下載連結。理由：半套設定好的機器比乾淨地停下來更難查。
