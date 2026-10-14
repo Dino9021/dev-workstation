@@ -425,6 +425,16 @@ function Test-DependencyPresent {
       that is not python at all - see the python row for the measurement.
     #>
     param($Dep)
+    # ⭐ A WINDOWS FEATURE IS ANSWERED BY THE FILE IT INSTALLS, not by asking DISM. The
+    # obvious probe is Get-WindowsOptionalFeature, and it is worse in three ways: it needs
+    # the DISM PowerShell module, which a stripped image may not have; it may need rights
+    # the running account has not got; and parsing dism.exe's text instead is
+    # locale-dependent - "State : Enabled" is not what a Chinese or German Windows prints.
+    # A file either exists or it does not, in every language and for every account.
+    # MEASURED 2026-10-14 with a negative control: TelnetClient Enabled and
+    # System32	elnet.exe present; TFTP Disabled and System32	ftp.exe absent - so the
+    # probe tracks the feature rather than passing everything.
+    if ($Dep.FileProbe) { return (Test-Path -LiteralPath $Dep.FileProbe) }
     # ⛔ pwsh IS ANSWERED BY Get-Pwsh7Path AND NOTHING ELSE, so the gate, phase 1 and phase
     # 2 cannot disagree - which is what three comments in this file already claimed before
     # it was true. Bare Get-Command is wrong for this row in BOTH directions: PowerShell 6
@@ -1369,6 +1379,34 @@ $DEPS = @(
        Args = $null; Script = 'https://astral.sh/uv/install.ps1';
        PathAdd = '.local\bin' }
 
+    # ---------------------------------------------- asked for on 2026-10-14 by the owner
+    # Both are Optional: nothing in this repository uses either of them, so a run without
+    # the rights to install them leaves them out, says so at the end, and carries on. They
+    # are here because a workstation is used for more than this project.
+
+    # A Windows optional feature, not a download - the files are already on the machine and
+    # DISM turns them on. The first row in this table that is not fetched from anywhere.
+    #
+    # NeedsAdmin: enabling a feature writes to the component store, which is machine-wide by
+    # definition. ⚠ The PROBE may also need rights, and is written to read "absent" when it
+    # cannot answer - see Test-DependencyPresent. That is safe here precisely because the
+    # row is Optional: the worst an unprivileged run gets is one line in the skipped list.
+    @{ Name = 'telnet'; Exe = $null; NeedsAdmin = $true; Optional = $true;
+       Feature = 'TelnetClient';
+       FileProbe = (Join-Path $env:windir 'System32\telnet.exe');
+       Url = 'https://learn.microsoft.com/windows-server/administration/windows-commands/telnet';
+       File = $null; Args = $null }
+
+    # PuTTY, from the project's own page. ⛔ ITS FILENAME CARRIES THE VERSION, so the pin
+    # below rots on every release - hence the resolver. Measured 2026-10-14: the page lists
+    # four MSIs and two of them have "64" in the name, the x64 one and the ARM64 one, which
+    # is why Resolve-PuttyAsset anchors on the /w64/ directory instead.
+    @{ Name = 'putty'; Exe = 'putty'; NeedsAdmin = $true; Optional = $true;
+       Resolver = 'putty';
+       LatestPage = 'https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html';
+       Url = 'https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-0.85-installer.msi';
+       File = 'putty-64bit-0.85-installer.msi'; Args = @('/qn', '/norestart') }
+
     # The claude CLI has no versioned download, so the vendor's own installer script
     # is the documented method. It is fetched and executed - stated here rather than
     # buried, because that is what it does.
@@ -1549,6 +1587,37 @@ function Resolve-TortoiseGitAsset {
     catch { return $null }
 }
 
+# ONE LIVE COPY of the pattern, so the self-test exercises the regex the function uses
+# rather than a second one that can drift away from it.
+$PUTTY_W64_MATCH = '/w64/[^/]*\.msi$'
+
+function Resolve-PuttyAsset {
+    <#
+      PuTTY publishes its current release on one page and names the file after the version,
+      so the pinned URL rots on every release - the same shape as git and TortoiseGit, and
+      the same answer: ask the project, keep the pin as the fallback.
+
+      Measured 2026-10-14, the page listed four MSIs:
+        .../latest/w64/putty-64bit-0.85-installer.msi      <- the one we want
+        .../latest/wa64/putty-arm64-0.85-installer.msi
+        .../latest/w32/putty-0.85-installer.msi
+        .../latest/wa32/putty-arm32-0.85-installer.msi
+      ⛔ So the match is anchored on the w64 DIRECTORY, not on "64" anywhere in the name -
+      `putty-arm64-...` contains 64 too, and an unanchored pattern would hand an ARM build
+      to an x64 machine, which fails at install time with nothing to point at.
+    #>
+    param($Dep)
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $page = Invoke-WebRequest -Uri $Dep.LatestPage -UseBasicParsing -ErrorAction Stop
+        $hit = @($page.Links | ForEach-Object { [string] $_.href } |
+                 Where-Object { $_ -match $PUTTY_W64_MATCH }) | Select-Object -First 1
+        if (-not $hit) { return $null }
+        return @{ Tag = 'latest'; Url = $hit; File = ($hit -split '/')[-1] }
+    }
+    catch { return $null }
+}
+
 function Get-InstallRoute {
     <#
       How a dependency WOULD be installed, as one readable line, so -CheckOnly can
@@ -1560,9 +1629,11 @@ function Get-InstallRoute {
     #>
     param($Dep)
 
+    if ($Dep.Feature) { return "Windows feature  $($Dep.Feature), enabled with DISM - nothing is downloaded" }
     if ($Dep.Script) { return "vendor script    $($Dep.Script)" }
     if ($Dep.Resolver -eq 'github') { return "direct download  current release from $($Dep.LatestApi) (pinned fallback: $($Dep.File))" }
     if ($Dep.Resolver -eq 'tortoisegit') { return "direct download  current release from $($Dep.LatestIni) (pinned fallback: $($Dep.File))" }
+    if ($Dep.Resolver -eq 'putty') { return "direct download  current release from $($Dep.LatestPage) (pinned fallback: $($Dep.File))" }
     if ($Dep.Url) { return "direct download  $($Dep.Url)" }
     return 'NO ROUTE - this dependency cannot be installed on this host'
 }
@@ -1686,6 +1757,29 @@ function Install-Dependency {
     # (Measured 2026-10-06 on Windows Server 2022 Standard 10.0.20348: Add-AppxPackage
     # is absent and Get-AppxPackage answers "Operation is not supported on this
     # platform. (0x80131539)", so "install winget first" is not a fallback either.)
+    # A Windows optional feature is already on the machine - nothing is downloaded, DISM
+    # just turns it on. Handled before the download block for that reason.
+    if ($Dep.Feature) {
+        # dism.exe, not Enable-WindowsOptionalFeature - the owner's own command, 2026-10-14,
+        # and the more robust of the two: dism.exe ships with Windows, while the cmdlet
+        # needs the DISM PowerShell module that a stripped image may not carry.
+        # /NoRestart because nothing in this script may reboot a machine out from under
+        # somebody; 3010 then means "enabled, restart pending" and Test-InstallExit already
+        # treats it as success.
+        Write-Host "   dism /online /Enable-Feature /FeatureName:$($Dep.Feature)"
+        $proc = Start-Process -FilePath 'dism.exe' -Wait -PassThru -NoNewWindow -ArgumentList @(
+            '/online', '/Enable-Feature', "/FeatureName:$($Dep.Feature)", '/NoRestart')
+        if (-not (Test-InstallExit $proc.ExitCode)) {
+            $hint = Get-InstallExitHint $proc.ExitCode
+            if ($hint) { throw "$($Dep.Name): dism exited $($proc.ExitCode) - $hint" }
+            throw "$($Dep.Name): dism exited $($proc.ExitCode)"
+        }
+        if ($proc.ExitCode -eq 3010) {
+            Write-Host "   enabled - Windows wants a restart before it works" -ForegroundColor Yellow
+        }
+        return
+    }
+
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
     # The pin is the FALLBACK, not the plan. Ask the project what is current first;
@@ -1699,6 +1793,7 @@ function Install-Dependency {
         switch ($Dep.Resolver) {
             'github'      { $latest = Resolve-LatestAsset $Dep }
             'tortoisegit' { $latest = Resolve-TortoiseGitAsset $Dep }
+            'putty'       { $latest = Resolve-PuttyAsset $Dep }
             default       { Write-Host "   unknown resolver '$($Dep.Resolver)' - using the pin" -ForegroundColor Yellow }
         }
         if ($latest) {
@@ -2053,6 +2148,86 @@ function Invoke-SelfTest {
     Check 'status: the STOPPED string does NOT match the running test' (-not ($stopped -match 'Worker is running'))
     Check 'status: the stopped string matches its own test' ($stopped -match 'Worker is not running')
 
+    # ⛔ NO CONTROL CHARACTER MAY HIDE IN A PATH OR A URL IN THIS TABLE, and this case
+    # exists because it has now happened three times in one day. A path written through a
+    # layer that interprets backslash escapes comes out silently mangled:
+    #   'Program Files\nodejs'      -> a real NEWLINE, which left a bare `odejs.` executing
+    #   'System32\telnet.exe'       -> a real TAB, so the probe pointed at nothing
+    #   '.../2.19.1.0/...'          -> \7, which is an octal escape, not a path
+    # Every one of them LOOKED right in a diff and none of them failed loudly. Two were
+    # caught by something unrelated; the newline was caught by a user-facing run.
+    # ⚠ And the obvious test does NOT catch it: a case asserting "the probe agrees with
+    # Test-Path" passed with the mangled path, because both answered False for different
+    # reasons. A silent instrument agreeing with a broken one is not a check.
+    $smuggled = @()
+    foreach ($d in $DEPS) {
+        foreach ($k in @('Url', 'File', 'FileProbe', 'RegKey', 'RegFile', 'Script', 'PathAdd', 'LatestApi', 'LatestIni', 'LatestPage')) {
+            $v = [string] $d.$k
+            if ($v -and ($v -match "[`t`r`n`a`b`f`v`0]")) { $smuggled += "$($d.Name).$k" }
+        }
+        if ($d.Portable) {
+            foreach ($k in @('Url', 'File', 'Dir', 'Probe', 'Sha256')) {
+                $v = [string] $d.Portable.$k
+                if ($v -and ($v -match "[`t`r`n`a`b`f`v`0]")) { $smuggled += "$($d.Name).Portable.$k" }
+            }
+        }
+    }
+    # Single quotes: in a double-quoted string PowerShell escapes with a BACKTICK, not a
+    # backslash, so "\$DEPS" interpolates the table and the case name came out as twelve
+    # copies of System.Collections.Hashtable.
+    Check 'no control character is hiding in a $DEPS path or URL' ($smuggled.Count -eq 0)
+    # The positive control: the check must FIRE on a value that really is mangled, or its
+    # clean answer above means nothing.
+    $mangled = "System32`telnet.exe"
+    Check 'and that check actually fires on a tab-mangled path' ($mangled -match "[`t`r`n`a`b`f`v`0]")
+
+    # ⛔ THE COMMA TRAP, A THIRD TIME, IN A THIRD PLACE - so it gets a case of its own
+    # rather than another comment. Get-MissingDependency returns `,$missing`. Piping that
+    # STRAIGHT into Where-Object unrolls the wrapper and hands the whole inner array over as
+    # ONE object, so the filtered result is Count 1 whatever the real count is. Shipped on
+    # 2026-10-08 in phase 2's "still missing" check; on a machine where everything installed
+    # it printed an EMPTY list and stopped the run before five more phases. Assigning first
+    # and filtering the variable is correct at 0, 1 and n.
+    function Test-CommaMissing { param([int] $N) $m = @(); for ($i = 0; $i -lt $N; $i++) { $m += @{ Name = "r$i" } }; return ,$m }
+    $wrong = @(); $right = @()
+    foreach ($n in 0, 1, 2) {
+        $wrong += @(Test-CommaMissing $n | Where-Object { $_.Name -ne 'nope' }).Count
+        $plain = Test-CommaMissing $n
+        $right += @($plain | Where-Object { $_.Name -ne 'nope' }).Count
+    }
+    Check 'missing-set: assigning first then filtering counts 0, 1, 2 correctly' (($right -join ',') -eq '0,1,2')
+    # The positive control: the WRONG shape must really be wrong, or the case above proves
+    # nothing about why the right one is written the way it is.
+    Check 'missing-set: and piping the comma-return straight in is 1 every time' (($wrong -join ',') -eq '1,1,1')
+
+    # ⛔ AND THE TWO CASES ABOVE DO NOT GUARD THE CODE - measured. Reverting phase 2 to the
+    # broken shape left them both passing, because they exercise a LOCAL COPY of the
+    # pattern and the real line is runtime code that reads the machine. A demonstration is
+    # not a guard. So this one reads the script's own source and refuses the shape outright.
+    $ownText = ''
+    if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+        $ownText = Get-Content -LiteralPath $PSCommandPath -Raw
+    }
+    # ⚠ THE PATTERN IS GLUED TOGETHER TOO, for the same reason as the control below: written
+    # as one literal it IS the shape it forbids, sitting in the file it scans, and the clean
+    # source failed on three matches - the pattern twice and the control once. A sweep that
+    # finds its own report is not a sweep.
+    $pat = ('Get-Missing' + 'Dependency') + '[^\r\n|]*\|'
+    $pipedStraight = @([regex]::Matches($ownText, $pat))
+    Check 'missing-set: no line pipes Get-MissingDependency straight into a filter' ($pipedStraight.Count -eq 0)
+    # Positive control: the pattern must fire on the shape it is meant to catch, or a clean
+    # source scan means only that the regex matches nothing at all.
+    # ⚠ THE CONTROL IS GLUED TOGETHER AT RUNTIME, and it has to be. Written as one literal
+    # it IS the forbidden shape, sitting in the file the scan reads - so the scan found its
+    # own control and the clean source failed. Measured. Split, the forbidden sequence
+    # never appears contiguously in this file.
+    $forbidden = ('Get-Missing' + 'Dependency $DEPS ') + '| Where-Object { $true }'
+    Check 'missing-set: and that scan fires on the shape it forbids' ([regex]::IsMatch($forbidden, $pat))
+    # And a LOOKALIKE that must NOT match: the correct two-line shape, where the pipe is on
+    # a different line from the call. Without this the scan could be forbidding everything.
+    $allowed = ('$a = Get-Missing' + "Dependency `$DEPS`r`n") + '$b = @($a | Where-Object { $true })'
+    Check 'missing-set: and it does NOT fire on the correct two-line shape' (-not [regex]::IsMatch($allowed, $pat))
+
     # A dependency with no install route can only ever be reported as missing.
     $unreachable = @($DEPS | Where-Object { (-not $_.Url) -and (-not $_.Script) })
     Check 'every dependency has a URL or an installer script' ($unreachable.Count -eq 0)
@@ -2158,7 +2333,7 @@ function Invoke-SelfTest {
     # The exact set, by name - not a count. A count widens silently the day somebody
     # adds a row; this fails and makes them say which way it goes.
     $adminNames = (@($DEPS | Where-Object { $_.NeedsAdmin } | ForEach-Object { $_.Name }) | Sort-Object) -join ','
-    $expectAdmin = (@('node', 'pwsh', 'tortoisegit', 'vcredist-x64', 'vcredist-x86') | Sort-Object) -join ','
+    $expectAdmin = (@('node', 'pwsh', 'putty', 'telnet', 'tortoisegit', 'vcredist-x64', 'vcredist-x86') | Sort-Object) -join ','
     Check "gate: NeedsAdmin is exactly {$expectAdmin}" ($adminNames -eq $expectAdmin)
 
     # And the other direction, named one by one, because each of these was MEASURED
@@ -2218,7 +2393,7 @@ function Invoke-SelfTest {
     # Exactly which rows, by name - the same shape as the NeedsAdmin assertion, so adding a
     # row to this set is a decision somebody has to make on purpose.
     $optNames = (@($DEPS | Where-Object { $_.Optional } | ForEach-Object { $_.Name }) | Sort-Object) -join ','
-    $expectOpt = (@('tortoisegit', 'vcredist-x64', 'vcredist-x86') | Sort-Object) -join ','
+    $expectOpt = (@('putty', 'telnet', 'tortoisegit', 'vcredist-x64', 'vcredist-x86') | Sort-Object) -join ','
     Check "skip: Optional is exactly {$expectOpt}" ($optNames -eq $expectOpt)
     # pwsh and node are NOT optional, and that is the measured reason: graph-servers'
     # install.ps1 refuses to run under anything below PowerShell 7, and GitNexus and
@@ -2362,9 +2537,12 @@ function Invoke-SelfTest {
     # command whose job is finding rotted links.
     $urlRows = @()
     foreach ($d in $DEPS) {
-        if ($d.Url) { $urlRows += $d.Url } elseif ($d.Script) { $urlRows += $d.Script }
+        if ($d.Feature) { } elseif ($d.Url) { $urlRows += $d.Url } elseif ($d.Script) { $urlRows += $d.Script }
         if ($d.Portable) { $urlRows += $d.Portable.Url }
     }
+    # A feature row must NOT be in that set - see the comment in Invoke-UrlCheck.
+    Check 'telnet: a Windows feature row is NOT url-checked' ($urlRows -notcontains $telnetRow.Url)
+    Check 'putty: but a real download row IS' ($urlRows -contains ($DEPS | Where-Object { $_.Name -eq 'putty' }).Url)
     Check 'portable: both archive URLs are in the -CheckUrls set' (
         ($urlRows -contains $pwshRowP.Portable.Url) -and ($urlRows -contains $nodeRowP.Portable.Url))
 
@@ -2395,6 +2573,43 @@ function Invoke-SelfTest {
     # repository, because that is the dangerous half.
     Check 'update: enclosing-repository beats dirty in the message' (
         (Test-UpdatableClone -Dir 'C:\proj\ws' -TopLevel 'C:/proj' -Porcelain ' M a.txt') -match 'INSIDE another repository')
+
+    # ------------------------------------------- putty and telnet (owner, 2026-10-14)
+    # ⛔ THE LOOKALIKE IS THE WHOLE POINT. Measured 2026-10-14, PuTTY's page lists four
+    # MSIs and TWO of them have "64" in the file name - the x64 build and the ARM64 one.
+    # A pattern matching "64" anywhere would hand an ARM build to an x64 machine, which
+    # fails at install time with nothing to point at. So it anchors on the /w64/ DIRECTORY.
+    $puttyLinks = @(
+        'https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-0.85-installer.msi',
+        'https://the.earth.li/~sgtatham/putty/latest/wa64/putty-arm64-0.85-installer.msi',
+        'https://the.earth.li/~sgtatham/putty/latest/w32/putty-0.85-installer.msi',
+        'https://the.earth.li/~sgtatham/putty/latest/wa32/putty-arm32-0.85-installer.msi')
+    $puttyPick = @($puttyLinks | Where-Object { $_ -match $PUTTY_W64_MATCH })
+    Check 'putty: exactly ONE of the four published MSIs matches' ($puttyPick.Count -eq 1)
+    Check 'putty: and it is the x64 build, not the ARM64 one' ($puttyPick[0] -match 'putty-64bit-')
+    # The naive pattern, asserted to be wrong, so nobody "simplifies" back to it.
+    Check 'putty: matching 64 anywhere would pick up the ARM build too' (
+        @($puttyLinks | Where-Object { $_ -match '64.*\.msi$' }).Count -gt 1)
+
+    # The Windows-feature route: a row that is enabled rather than downloaded.
+    $telnetRow = $DEPS | Where-Object { $_.Name -eq 'telnet' }
+    Check 'telnet: it is a Windows feature row, with no installer file' (
+        ($telnetRow.Feature -eq 'TelnetClient') -and (-not $telnetRow.File))
+    # ⭐ The probe is the FILE the feature installs, not a DISM query: no module to be
+    # missing, no rights to be refused, and no locale to mis-parse. Measured with a
+    # negative control - TFTP disabled, tftp.exe absent - so it tracks the feature.
+    Check 'telnet: it is probed by the file it installs, in System32' (
+        $telnetRow.FileProbe -match 'System32.telnet\.exe$')
+    Check 'telnet: and that probe answers the same as the real file test' (
+        (Test-DependencyPresent $telnetRow) -eq (Test-Path -LiteralPath $telnetRow.FileProbe))
+    Check 'telnet: and its route says so rather than promising a download' (
+        (Get-InstallRoute $telnetRow) -match 'Windows feature')
+    # Both of today's additions are convenience software: administrator-only, and nothing
+    # here depends on them, so an unprivileged run must SKIP rather than stop.
+    foreach ($n in @('telnet', 'putty')) {
+        $row = $DEPS | Where-Object { $_.Name -eq $n }
+        Check "$n is administrator-only AND optional" (($row.NeedsAdmin -eq $true) -and ($row.Optional -eq $true))
+    }
 
     # ---------------------------------------------- the exit-code hints
     Check 'hint: 1601 says administrator' ((Get-InstallExitHint 1601) -match 'administrator')
@@ -2427,7 +2642,12 @@ function Invoke-UrlCheck {
     #>
     $rows = @()
     foreach ($d in $DEPS) {
-        if ($d.Url) { $rows += @{ Name = $d.Name; Url = $d.Url } }
+        # ⛔ A FEATURE ROW HAS NOTHING TO CHECK. Its Url is documentation, not a download,
+        # and the payload test correctly calls a documentation page 'a WEB PAGE, not an
+        # installer' - which in this one command reads as a rotted link. A false alarm in
+        # the tool whose entire job is finding real ones is worse than no check at all.
+        if ($d.Feature) { }
+        elseif ($d.Url) { $rows += @{ Name = $d.Name; Url = $d.Url } }
         elseif ($d.Script) { $rows += @{ Name = $d.Name; Url = $d.Script } }
         # ⛔ AND THE PORTABLE ARCHIVE, which is a SECOND pinned URL on the same row. Review
         # of the portable ADR found this blind spot before the field existed: this loop read
@@ -2762,9 +2982,13 @@ if (-not $SkipDeps) {
                 foreach ($o in $gateOptional) {
                     Write-Host ("     {0,-14} {1}" -f $o.Name, $o.Url) -ForegroundColor Yellow
                 }
-                Write-Host "     TortoiseGit is the graphical way to use git in Windows Explorer."
-                Write-Host "     It is worth having, and the two VC++ runtimes are what it needs."
-                Write-Host "     Nothing in this workstation depends on them - git itself does not."
+                Write-Host ""
+                Write-Host "     TortoiseGit is the graphical way to use git in Windows Explorer, and"
+                Write-Host "     the two VC++ runtimes are the prerequisite it names. PuTTY is an SSH"
+                Write-Host "     and serial terminal; the Telnet Client is a Windows feature, already"
+                Write-Host "     on the machine and only needing to be turned on:"
+                Write-Host "       Enable-WindowsOptionalFeature -Online -FeatureName TelnetClient"
+                Write-Host "     Nothing in this workstation depends on any of them - git itself does not."
             }
             Write-Host ""
             Write-Host "   Three ways forward, any of them is fine:" -ForegroundColor Cyan
@@ -3154,7 +3378,18 @@ if ($missing.Count -gt 0) {
         }
         # A deliberately skipped row is not a failure, so it must not stop the run here -
         # but EVERYTHING ELSE still must, exactly as before.
-        $still = @(Get-MissingDependency $DEPS | Where-Object { $skipNames -notcontains $_.Name })
+        # ⛔ ASSIGNED FIRST, THEN FILTERED, and the two lines are not interchangeable with
+        # one. Get-MissingDependency returns `,$missing`; piped STRAIGHT into Where-Object
+        # the wrapper unrolls and the whole inner array arrives as ONE object, so the result
+        # is Count 1 at every size - measured at 0, 1 and 2 missing rows, all 1, with the
+        # element typed Object[]. That shipped on 2026-10-08 and this is what it did: on a
+        # machine where everything installed, the run printed "still missing: " with an
+        # EMPTY list and stopped before the VS Code extension, deploy.py, the graph servers,
+        # claude-mem, the plugins and the summary. Found by a real run on a clean VM,
+        # 2026-10-14; no self-test reached it, because the shape only misbehaves against a
+        # genuinely empty missing-set.
+        $stillAll = Get-MissingDependency $DEPS
+        $still = @($stillAll | Where-Object { $skipNames -notcontains $_.Name })
         if ($still.Count -gt 0) {
             Write-Host ""
             Write-Host "   still missing: $(($still | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Red
@@ -3625,10 +3860,13 @@ if ($script:toolsSkipped.Count -gt 0) {
     }
     Write-Host ""
     Write-Host "   NOTHING IS BROKEN, and nothing above was left half-done." -ForegroundColor Cyan
-    Write-Host "   Everything this workstation actually uses is installed and working."
-    Write-Host "   TortoiseGit is the graphical way to use git from Windows Explorer, and the"
-    Write-Host "   two VC++ runtimes are the prerequisite it names. They are worth having, and"
-    Write-Host "   nothing here depends on them - git itself does not."
+    Write-Host "   Everything this workstation actually uses is installed and working. The list"
+    Write-Host "   above is convenience software: TortoiseGit is the graphical way to use git"
+    Write-Host "   from Windows Explorer and the two VC++ runtimes are what it needs, PuTTY is an"
+    Write-Host "   SSH and serial terminal, and the Telnet Client is a Windows feature that is"
+    Write-Host "   already on the machine and only needs turning on:"
+    Write-Host "     Enable-WindowsOptionalFeature -Online -FeatureName TelnetClient"
+    Write-Host "   Nothing here depends on any of them - git itself does not."
     Write-Host ""
     Write-Host "   To get them, ask whoever administers this machine to install them from the"
     Write-Host "   addresses above - once, and nothing here has to be redone afterwards. Or run"
