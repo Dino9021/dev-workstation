@@ -1,5 +1,40 @@
+# ⚠ THIS FILE IS MAINTAINED BY HAND, and deliberately. Tools/publish-public.py mirrors the
+# private repository's tree but NOT this file - it ignores itself, on the line below - so
+# that the public snapshot can carry its own rules. Every publish prints the rules the
+# private .gitignore has and this one lacks, and says "add them by hand if they matter
+# here". The block at the bottom is the answer to that prompt.
 Memory/
 .gitignore
 CLAUDE.local.md*
 __pycache__/
 *.pyc
+
+# ⛔ EVERYTHING BELOW IS WRITTEN BY THE INSTALLER INTO ITS OWN CLONE, and without these
+# rules the clone is DIRTY the moment a full install finishes. Measured on a test VM,
+# 2026-10-14: after one complete run, `git status` in C:\WorkSpace\dev-workstation showed
+#     M .gitignore        <- Tools/deploy.py appending the two rules below
+#     ?? .gitnexus/       <- the GitNexus index
+#     ?? CLAUDE.md        <- the project template deploy.py places
+#     ?? Debug/           <- install.ps1's OWN run logs
+# and install.ps1's self-update then refused to run, correctly, because the tree was not
+# clean. So the one-line command updated a machine once and never again - the promise
+# degrading silently, which is the failure this project spends most of its comments on.
+#
+# The modified `.gitignore` was the only TRACKED change, and it was this file's own fault:
+# deploy.py appends the manifest rules because they were not here.
+
+# Written by Tools/deploy.py. Per-run, per-machine: the manifest is this clone's own
+# deployment state, and a copy of it on a machine that has nothing installed would lie
+# about what is deployed.
+/.claude/.deploy-manifest.json
+/.claude/deploy-report-*.md
+
+# install.ps1's run transcript. One file per run, named for the moment it started.
+/Debug/install-*.log
+
+# The GitNexus index for this clone. Per-machine, rebuilt by `gitnexus analyze`, and large.
+/.gitnexus/
+
+# The project CLAUDE.md that Tools/deploy.py places here from the template. It is meant to
+# be filled in per machine and per person; it is not part of the published snapshot.
+/CLAUDE.md
