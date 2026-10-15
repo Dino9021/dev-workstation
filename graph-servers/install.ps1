@@ -159,6 +159,36 @@ function Step([string] $Name, [scriptblock] $Body) {
     }
 }
 
+function Test-IsWindowsHost {
+    <#
+      Is this a Windows host?
+
+      PURE given its two inputs, which the caller measures - so -SelfTest drives BOTH
+      arms from either platform. On Windows there is no other way to reach the
+      non-Windows arm at all.
+
+      ⚠ THIS RESTATES THE SAME RULE AS install.ps1's Test-IsWindowsHost, AND THAT IS
+      DELIBERATE, for the reason the OutputEncoding block above gives about itself:
+      this file is independently runnable, and the root install.ps1 is DOWNLOADED ON
+      ITS OWN onto a host with no repository, so neither can dot-source anything from
+      the other. The rule therefore lives in both, and both self-tests assert it - a
+      shared helper file would be a third thing that has to arrive before either works.
+
+      ⛔ $null IS NOT $false. $IsWindows does not exist under Windows PowerShell 5.1 -
+      measured on PENRIL 2026-10-15: under 5.1.20348.5622 ($null -eq $IsWindows) is
+      True and [bool]$IsWindows is False, while under pwsh 7.6.6 it is True. The gate
+      at the top of this file relaunches under 7, so 5.1 should never reach the caller
+      below; the rule is still written the safe way, because "should never" is an
+      assumption about the gate rather than about this function, and the day somebody
+      dot-sources these helpers from a 5.1 session (which the PSDefaultParameterValues
+      comment above already contemplates) a bare $IsWindows answers "not Windows" ON
+      WINDOWS with no error.
+    #>
+    param([object] $IsWindowsVar, [string] $DotNetPlatform)
+    if ($null -eq $IsWindowsVar) { return ($DotNetPlatform -eq 'Win32NT') }
+    return [bool] $IsWindowsVar
+}
+
 function Resolve-Python {
     if ($env:CRG_PYTHON) { return $env:CRG_PYTHON }
     $cmd = Get-Command python -ErrorAction SilentlyContinue
@@ -711,6 +741,25 @@ function Invoke-SelfTest {
     }
     finally { Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- the platform guard, both arms, from whichever platform is running the test.
+    # The non-Windows arm is unreachable on Windows by any other means, and the first
+    # case is the one that would refuse every run on a stock host if the guard read
+    # $IsWindows bare: under 5.1 the variable does not exist, and $null is not $false.
+    foreach ($c in @(
+        @{ Var = $null;  Plat = 'Win32NT'; Want = $true;  Name = 'no $IsWindows (5.1) on Win32NT is Windows' }
+        @{ Var = $true;  Plat = 'Win32NT'; Want = $true;  Name = '$IsWindows True is Windows' }
+        @{ Var = $false; Plat = 'Unix';    Want = $false; Name = '$IsWindows False is NOT Windows' }
+        # The lookalike: $false while every other signal says Windows is still not
+        # Windows. The guard must not second-guess a host that answered.
+        @{ Var = $false; Plat = 'Win32NT'; Want = $false; Name = '$IsWindows False on Win32NT is still NOT Windows' }
+        # And the 5.1 deduction is corroborated, not trusted alone.
+        @{ Var = $null;  Plat = 'Unix';    Want = $false; Name = 'absent $IsWindows on Unix is NOT Windows' }
+    )) {
+        $ok = ((Test-IsWindowsHost $c.Var $c.Plat) -eq $c.Want)
+        if (-not $ok) { $fail++ }
+        Write-Host ("   {0} platform: {1}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $c.Name)
+    }
+
     Write-Host ""
     if ($fail) { Write-Host "SELFTEST FAILED ($fail)" -ForegroundColor Red; exit 1 }
     Write-Host "SELFTEST OK" -ForegroundColor Green
@@ -1053,6 +1102,40 @@ function Invoke-AgentDocPatch {
 }
 
 if ($SelfTest) { Invoke-SelfTest }
+
+# ------------------------------------------------- Windows-only, and it SAYS so
+# The macOS side of this project is a separate sh toolchain (owner, 2026-10-15), so
+# this file is Windows-only by decision rather than by accident. The same refusal the
+# root install.ps1 gained in a1b7b22, here because this script is independently
+# runnable and M1 asked for it: with both ends closed, nothing on a Mac can reach
+# Copy-MasterFile (:885-932, the real name - see the correction on the cowork board).
+#
+# ⛔ THE SHARED PATH IS WHY THIS MATTERS, AND IT IS NOT ~/.claude/hooks.
+# The macOS port installs a DIFFERENT file there (graph-refresh.sh), so the two never
+# collide. But `<repo>/.git/hooks/post-commit` is the SAME path on both platforms, and
+# Copy-MasterFile hashes whatever is there against this repository's Windows master
+# and overwrites a difference after a timestamped backup, with no platform branch
+# anywhere in it. Run on a Mac, this script would replace a working sh post-commit
+# hook with a `powershell`-launching one that fails at COMMIT time rather than here.
+#
+# It sits AFTER -SelfTest, which exits on its own and is pure, so the self-test stays
+# runnable on either platform - that is how the non-Windows arm is tested at all. It
+# sits BEFORE -PatchOnly because that path writes ~/.claude/settings.json and the
+# agent doc, which is a write, not a query.
+if (-not (Test-IsWindowsHost $IsWindows ([Environment]::OSVersion.Platform.ToString()))) {
+    Write-Host ""
+    Write-Host "graph-servers/install.ps1 is the WINDOWS installer, and this is not Windows." -ForegroundColor Red
+    Write-Host ("   detected: " + [Environment]::OSVersion.Platform + ", PowerShell " + $PSVersionTable.PSVersion)
+    Write-Host "   Nothing has been installed, changed, or written."
+    Write-Host "   Running it here would overwrite .git/hooks/post-commit with the Windows"
+    Write-Host "   master, which launches powershell and would fail at commit time."
+    Write-Host "   macOS is installed by a SEPARATE sh toolchain, not by this file."
+    Write-Host ""
+    Write-Host "   -SelfTest still runs here: it is pure and makes its own sandbox."
+    Write-Host ""
+    exit 2
+}
+
 if ($PatchOnly) { Invoke-SettingsPatch; Invoke-AgentDocPatch; exit 0 }
 
 # ---------------------------------------------------------------- preflight

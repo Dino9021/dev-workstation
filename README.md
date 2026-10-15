@@ -1,8 +1,8 @@
 # dev-workstation
 
-一條指令，把一台全新的 Windows 主機變成可以工作的 Claude Code 開發環境。
+一條指令，把一台全新的 Windows 主機或 Mac 變成可以工作的 Claude Code 開發環境。
 
-One command turns a bare Windows host into a working Claude Code development environment.
+One command turns a bare Windows host or Mac into a working Claude Code development environment.
 
 ## 安裝 / Install
 
@@ -38,6 +38,33 @@ $u='https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1'
 ⛔ Do not use `irm ... | iex`: the script relaunches itself with `-File $PSCommandPath` to
 hand over to PowerShell 7, and a script piped into `iex` has no path of its own. It **must**
 land on disk first. See "First install".
+
+### macOS
+
+開「終端機」，用你自己的帳號（不要加 `sudo`）貼上這一行。Windows 用 `install.ps1`，Mac 用
+`install.sh`：兩支腳本各自偵測作業系統，裝出同一套環境；在錯的平台上執行會直接停下並告訴你該用
+哪一支。更新一樣是同一行。
+
+Open Terminal and paste this line as yourself (no `sudo`). Windows uses `install.ps1`, a Mac
+uses `install.sh`: each detects the operating system itself and sets up the same environment,
+and each stops on the wrong platform and names the right one. The same line is the update.
+
+```sh
+curl -fsSLo /tmp/install.sh https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.sh && sh /tmp/install.sh
+```
+
+- 先下載成檔案再執行，不要 `curl … | sh`：管線會占走終端機，Cowork 的問題和 Homebrew 的安裝程式都
+  需要它。/ Download, then run — not `curl … | sh`: a pipe takes the terminal away from the
+  Cowork question and from the Homebrew installer.
+- 會 clone 到 `~/WorkSpace/dev-workstation`，工具裝在你自己的家目錄（`~/.local`），VS Code 裝進
+  `/Applications`。/ It clones into `~/WorkSpace/dev-workstation`; tools go into your home
+  (`~/.local`), VS Code into `/Applications`.
+- 只看不裝 / report only: `sh install.sh --check-only`　·　不互動 / unattended:
+  `sh install.sh --cowork no`
+- 會裝 Homebrew（GitNexus 需要它的 `openssl@3`），這一步要輸入一次管理員密碼，所以要在
+  「終端機」裡執行；沒有管理員權限的帳號會跳過它並說明原因。/ It installs Homebrew (GitNexus
+  needs its `openssl@3`), which asks for the administrator password once — so run it from
+  Terminal; an account that is not an administrator skips it and says why.
 
 ---
 

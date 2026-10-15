@@ -594,6 +594,10 @@ def main(argv):
     # ------------------------------------------------------------------ writes
     report = ["# deploy report %s\n\n" % STAMP,
               "Source: `%s`\n\nHome: `%s`\n\n" % (REPO, HOME)]
+    # Did this run CHANGE anything? A re-run on a finished machine must leave it as it was
+    # (owner, 2026-10-15) - and a report written on every no-op run was the one thing such
+    # a re-run still added: a new deploy-report-<stamp>.md per run, for ever.
+    changed_any = False
     for scope, root, _files in scopes:
         manifest = load_manifest(root)
         touched = False
@@ -631,11 +635,20 @@ def main(argv):
                                                (", backup `%s`" % saved) if saved else ""))
         if touched:
             save_manifest(root, manifest)
+            changed_any = True
         if scope == "repo":
             added = ensure_gitignore(root)
             if added:
+                changed_any = True
                 report.append("\n- added to `%s/.gitignore`: %s\n"
                               % (root, ", ".join("`%s`" % a for a in added)))
+
+    # The plugin keys and the installer relays always get a report: they act outside the
+    # files this script owns, so their output is worth keeping even when it says "present".
+    if not changed_any and not want_guard and not relays:
+        print()
+        print("⭐ nothing changed - every file was already in place; no report written.")
+        return 0
 
     if want_guard:
         report.append("\n" + settings_keys())

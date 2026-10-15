@@ -144,9 +144,27 @@ function Invoke-Once {
         $age = (Get-Date) - (Get-Item $lock).CreationTime
         if ($age.TotalMinutes -lt 30) { return }   # another refresh owns it
         Remove-Item $lock -Recurse -Force -ErrorAction SilentlyContinue   # crashed run
+        # ⛔ THE REMOVAL CAN FAIL, AND -ErrorAction SilentlyContinue HIDES IT. Windows
+        # refuses to delete a file another process holds open - POSIX unlink does not,
+        # which is why the sh port of this script is self-healing here and this one is
+        # not (measured 2026-10-15, both editions:
+        # Memory/tasks/20261015-202135-graph-refresh-lock/FINDING.md).
+        # Without this line the next New-Item throws, `catch { return }` swallows it, and
+        # every refresh is skipped SILENTLY AND FOR EVER - the 30-minute escape hatch does
+        # not help, because the escape hatch IS the removal that just failed.
+        if (Test-Path $lock) {
+            Write-Log "stale lock $lock could not be removed (something is holding it open) - refresh skipped"
+            return
+        }
     }
     try { New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null }
-    catch { return }                               # lost the race, nothing to do
+    catch {
+        # Normally a lost race, which is fine and self-correcting. Logged anyway because
+        # this file's rule is that every give-up path leaves one line - a refresh that
+        # silently did not happen is the thing that costs hours to diagnose.
+        Write-Log "could not take the lock $lock - refresh skipped ($($_.Exception.Message))"
+        return
+    }
     try { & $Body }
     finally { Remove-Item $lock -Recurse -Force -ErrorAction SilentlyContinue }
 }

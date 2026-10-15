@@ -567,6 +567,37 @@ function Test-IsElevated {
     return $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-IsWindowsHost {
+    <#
+      Is this a Windows host?
+
+      PURE given its two inputs, which the caller measures - so -SelfTest drives BOTH
+      arms from either platform. That is not a nicety here: nobody running this file
+      on Windows can otherwise reach its non-Windows arm at all, and an arm no test
+      can reach is an arm nobody has ever seen run.
+
+      ⛔ THE ARGUMENT IS $IsWindows AS THE HOST SEES IT, AND $null IS NOT $false.
+      $IsWindows does not exist under Windows PowerShell 5.1. Measured on PENRIL
+      2026-10-15, the same one-liner under each edition:
+
+          powershell  5.1.20348.5622   ($null -eq $IsWindows)=True    [bool]$IsWindows=False
+          pwsh        7.6.6            ($null -eq $IsWindows)=False   [bool]$IsWindows=True
+
+      This file RUNS under 5.1 - a fresh Windows host has nothing else, and phase 1
+      is what installs 7 and relaunches. So a bare `if ($IsWindows)` here would answer
+      "not Windows" ON WINDOWS and refuse every first run on a clean machine, with no
+      error to explain it. The variable being ABSENT is itself the evidence: absent
+      means 5.1, and 5.1 ships only on Windows.
+
+      The 5.1 branch still corroborates with OSVersion.Platform rather than trusting
+      the deduction alone, because this is a guard and a guard that cannot be wrong in
+      two ways at once is worth the one extra argument.
+    #>
+    param([object] $IsWindowsVar, [string] $DotNetPlatform)
+    if ($null -eq $IsWindowsVar) { return ($DotNetPlatform -eq 'Win32NT') }
+    return [bool] $IsWindowsVar
+}
+
 function Select-AdminBlocker {
     <#
       Of the rows that are MISSING, which ones can this user not install?
@@ -1891,6 +1922,23 @@ function Invoke-SelfTest {
     Check 'msiexec 1603 is failure' (-not (Test-InstallExit 1603))
     Check 'vc_redist 1638 is success (a NEWER build is already there)' (Test-InstallExit 1638)
 
+    # THE PLATFORM GUARD, both arms, from whichever platform happens to be running the
+    # test. The macOS arm is unreachable on Windows by any other means, and the first
+    # case is the one that would stop every clean first run if the guard read
+    # $IsWindows bare: under 5.1 the variable does not exist, and $null is not $false.
+    Check 'platform: no $IsWindows at all (5.1) on Win32NT is Windows' `
+          (Test-IsWindowsHost $null 'Win32NT')
+    Check 'platform: $IsWindows True is Windows'       (Test-IsWindowsHost $true 'Win32NT')
+    Check 'platform: $IsWindows False is NOT Windows'  (-not (Test-IsWindowsHost $false 'Unix'))
+    # The lookalike that matters: $false while every other signal says Windows is still
+    # not Windows. The guard must not "helpfully" second-guess a host that answered.
+    Check 'platform: $IsWindows False on Win32NT is still NOT Windows' `
+          (-not (Test-IsWindowsHost $false 'Win32NT'))
+    # And the deduction is corroborated, not trusted alone: absent AND a Unix platform
+    # is not Windows, whatever the absence would have implied on its own.
+    Check 'platform: absent $IsWindows on a Unix platform is NOT Windows' `
+          (-not (Test-IsWindowsHost $null 'Unix'))
+
     $none = Get-ForwardArgs @{}
     Check 'nothing bound forwards nothing' ($none.Count -eq 0)
 
@@ -2806,6 +2854,40 @@ if ($CheckUrls) {
     Write-Host ""
     Write-Host "== Pinned download URLs (HEAD only - nothing is downloaded)" -ForegroundColor Cyan
     exit (Invoke-UrlCheck)
+}
+
+# ------------------------------------------------- Windows-only, and it SAYS so
+# The macOS side of this project is a separate sh installer (owner, 2026-10-15), so
+# this file is Windows-only by decision rather than by accident - and a decision a
+# script does not state is one its user finds out by hitting it. Without this check a
+# macOS run gets as far as handing a .msi to an msiexec that is not there, and what
+# the person sees is a missing-command error from three layers down, not "this is not
+# the installer for your machine".
+#
+# WHERE IT SITS IS THE WHOLE DESIGN:
+#   - AFTER -SelfTest and -CheckUrls, which are pure and offline, so both stay
+#     runnable on any platform. The self-test is how the macOS arm is tested at all.
+#   - BEFORE Start-RunLog, so a refused run writes nothing whatsoever. This file owns
+#     exactly one file, its log, and a machine it refuses to install on does not get
+#     even that.
+#
+# $IsWindows is read through Get-Variable, not named directly, for the reason the
+# declaration block above gives about $script:coworkAsked: naming a variable that may
+# not exist is the same answer as $null right up until somebody adds Set-StrictMode,
+# and under 5.1 this one genuinely does not exist.
+$script:isWindowsVar = $null
+$ivw = Get-Variable -Name 'IsWindows' -ErrorAction SilentlyContinue
+if ($null -ne $ivw) { $script:isWindowsVar = $ivw.Value }
+if (-not (Test-IsWindowsHost $script:isWindowsVar ([Environment]::OSVersion.Platform.ToString()))) {
+    Write-Host ""
+    Write-Host "install.ps1 is the WINDOWS installer, and this is not a Windows host." -ForegroundColor Red
+    Write-Host ("   detected: " + [Environment]::OSVersion.Platform + ", PowerShell " + $PSVersionTable.PSVersion)
+    Write-Host "   Nothing has been installed, changed, or written - not even a log."
+    Write-Host "   macOS is installed by a SEPARATE sh script, not by this file. See README.md."
+    Write-Host ""
+    Write-Host "   -SelfTest and -CheckUrls still run here: both are pure and offline."
+    Write-Host ""
+    exit 2
 }
 
 if ($LogPath) { $script:logFile = $LogPath }

@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPLOY = os.path.join(REPO, "Tools", "deploy.py")
@@ -288,6 +289,25 @@ def test_report_never_lands_in_the_other_scope():
     print("ok   the report stays in your own profile when --user is in play")
 
 
+def test_rerun_on_a_finished_machine_writes_no_report():
+    """A re-run on a machine that is already set up must leave it as it was (owner,
+    2026-10-15). Measured on the Mac before this test existed: the ONLY thing a full re-run
+    still added was a new deploy-report-<stamp>.md. The first run must still write one -
+    that is the control proving the instrument can see a report at all."""
+    home = tempfile.mkdtemp(prefix="deploy-home-")
+    reports = lambda: glob.glob(os.path.join(home, ".claude", "deploy-report-*.md"))
+    rc, out = run_user(home, "--apply")
+    assert rc == 0, out
+    assert len(reports()) == 1, "the first run, which installed files, wrote no report:\n" + out
+    time.sleep(1.1)   # the report name carries a seconds stamp - a second one must not collide
+    rc, out = run_user(home, "--apply")
+    assert rc == 0, out
+    assert len(reports()) == 1, "a no-op re-run wrote another report: %r\n%s" % (reports(), out)
+    assert "no report written" in out, out
+    shutil.rmtree(home, ignore_errors=True)
+    print("ok   a no-op re-run writes no report (and the first run still does)")
+
+
 def test_no_manifest_entry_fails_closed_MUTATION():
     """⛔ MUTATION CHECK on the guard that actually carries the weight.
 
@@ -357,6 +377,7 @@ def main():
                test_user_scope_three_states,
                test_clean_upgrade_overwrites_and_backs_up,
                test_report_never_lands_in_the_other_scope,
+               test_rerun_on_a_finished_machine_writes_no_report,
                test_no_manifest_entry_fails_closed_MUTATION):
         fn()
     print("\nall checks passed")

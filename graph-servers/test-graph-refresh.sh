@@ -1,0 +1,161 @@
+#!/bin/sh
+# Tests for graph-refresh.sh and post-commit.sh (macOS). Offline, touches nothing real:
+# HOME, TMPDIR and PATH are pointed into a throwaway directory, and `node` / python are
+# stubs that record how they were called.
+#
+# Usage: sh graph-servers/test-graph-refresh.sh [SHELL]
+#   SHELL defaults to /bin/sh; run it again with /bin/dash to catch bash-isms.
+# Env:   REFRESH_UNDER_TEST overrides which refresher is tested (mutation checks).
+
+here=$(cd "$(dirname "$0")" && pwd)
+shell=${1:-/bin/sh}
+refresh=${REFRESH_UNDER_TEST:-$here/graph-refresh.sh}
+postcommit=$here/post-commit.sh
+
+pass=0
+fail=0
+check() {
+    if [ "$2" = 0 ]; then pass=$((pass + 1)); echo "  PASS  $1"
+    else fail=$((fail + 1)); echo "  FAIL  $1"; fi
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/graph-refresh-test.XXXXXX") || exit 1
+trap 'rm -rf "$work"' EXIT
+
+real_git=$(command -v git)
+bin=$work/bin
+mkdir -p "$bin" "$work/home" "$work/tmp"
+calls=$work/calls.log
+
+# Stubs: append one line per call. NODE_SLEEP makes node slow (detach test).
+cat >"$bin/node" <<'EOF'
+#!/bin/sh
+echo "node $*" >>"$STUB_CALLS"
+[ -n "$NODE_SLEEP" ] && sleep "$NODE_SLEEP"
+exit "${NODE_EXIT:-0}"
+EOF
+cat >"$bin/fakepython" <<'EOF'
+#!/bin/sh
+echo "python $*" >>"$STUB_CALLS"
+exit 0
+EOF
+chmod +x "$bin/node" "$bin/fakepython"
+
+# A real git repository with one commit.
+repo=$work/repo
+mkdir -p "$repo"
+"$real_git" -C "$repo" init -q
+"$real_git" -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m one
+head=$("$real_git" -C "$repo" rev-parse HEAD)
+
+run() {
+    # run ARGS... - the refresher, synchronously, in the sandbox
+    : >"$calls"
+    env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" TMPDIR="$work/tmp" \
+        STUB_CALLS="$calls" CRG_PYTHON="${CRG:-$bin/fakepython}" NODE_EXIT="${NODE_EXIT:-0}" \
+        NODE_SLEEP="${NODE_SLEEP:-}" \
+        "$shell" "$refresh" "$@"
+}
+count() { grep -c "$1" "$calls" 2>/dev/null || true; }
+logged() { grep -q "$1" "$work/tmp/claude-graph-refresh.log" 2>/dev/null; }
+
+echo "graph-refresh.sh tests under $shell"
+
+# 1. argument handling
+run --which nonsense --repo "$repo" 2>/dev/null; check 'bad --which exits 2' "$([ $? = 2 ]; echo $?)"
+run --bogus 2>/dev/null; check 'unknown argument exits 2' "$([ $? = 2 ]; echo $?)"
+# --which / --repo as the LAST argument once looped for ever (shift 2 fails, nothing exits)
+( run --which >/dev/null 2>&1 & p=$!; sleep 3; if kill -0 $p 2>/dev/null; then kill $p; exit 1; fi; wait $p; [ $? = 2 ] )
+check 'a trailing --which with no value exits 2, does not hang' $?
+( run --repo >/dev/null 2>&1 & p=$!; sleep 3; if kill -0 $p 2>/dev/null; then kill $p; exit 1; fi; wait $p; [ $? = 2 ] )
+check 'a trailing --repo with no value exits 2, does not hang' $?
+
+# 2. not a git work tree: nothing runs
+mkdir -p "$work/plain/.code-review-graph"
+run --which both --repo "$work/plain"; rc=$?
+check 'non-repo: exit 0' "$([ $rc = 0 ]; echo $?)"
+check 'non-repo: no stub called' "$([ ! -s "$calls" ]; echo $?)"
+
+# 3. repo with no index of either kind: nothing runs
+run --which both --repo "$repo"
+check 'no index: no stub called' "$([ ! -s "$calls" ]; echo $?)"
+
+# 4. code-review-graph
+mkdir -p "$repo/.code-review-graph"
+run --which crg --repo "$repo"
+sleep 1    # the daemon start is backgrounded
+check 'crg: update -q --repo called once' "$([ "$(count 'code_review_graph update -q --repo')" = 1 ]; echo $?)"
+check 'crg: daemon started when no pid file' "$([ "$(count 'daemon start')" = 1 ]; echo $?)"
+mkdir -p "$work/home/.code-review-graph"; echo $$ >"$work/home/.code-review-graph/daemon.pid"
+run --which crg --repo "$repo"
+sleep 1
+check 'crg: live daemon pid is not restarted' "$([ "$(count 'daemon start')" = 0 ]; echo $?)"
+echo 999999 >"$work/home/.code-review-graph/daemon.pid"
+run --which crg --repo "$repo"
+sleep 1
+check 'crg: dead daemon pid is restarted' "$([ "$(count 'daemon start')" = 1 ]; echo $?)"
+check 'crg: --which gitnexus does not touch crg' \
+    "$(run --which gitnexus --repo "$repo"; sleep 1; [ "$(count code_review_graph)" = 0 ]; echo $?)"
+CRG=/nonexistent/python run --which crg --repo "$repo" >/dev/null 2>&1
+rm -rf "$repo/.code-review-graph"
+
+# 5. gitnexus
+mkdir -p "$repo/.gitnexus"
+: >"$repo/.gitnexus/run.cjs"
+printf '{"repoPath":"x","lastCommit":"%s","stats":{"Clear":1,"clear":2}}\n' "$head" >"$repo/.gitnexus/meta.json"
+run --which gitnexus --repo "$repo"
+check 'gitnexus: index at HEAD -> no analyze' "$([ "$(count 'node')" = 0 ]; echo $?)"
+
+printf '{"lastCommit" : "0123456789abcdef0123456789abcdef01234567"}\n' >"$repo/.gitnexus/meta.json"
+run --which gitnexus --repo "$repo"
+check 'gitnexus: index behind -> analyze --skip-agents-md' "$([ "$(count 'run.cjs analyze --skip-agents-md')" -ge 1 ]; echo $?)"
+check 'gitnexus: index that never catches up -> exactly 3 passes' "$([ "$(count 'node')" = 3 ]; echo $?)"
+
+NODE_EXIT=7 run --which gitnexus --repo "$repo"
+check 'gitnexus: failing analyze is logged with its exit code' "$(logged 'analyze exit 7'; echo $?)"
+
+printf '{"nothing":"here"}\n' >"$repo/.gitnexus/meta.json"
+run --which gitnexus --repo "$repo"
+check 'gitnexus: unreadable lastCommit -> no analyze' "$([ "$(count 'node')" = 0 ]; echo $?)"
+check 'gitnexus: unreadable lastCommit -> logged' "$(logged 'cannot read lastCommit'; echo $?)"
+
+# 6. the lock
+printf '{"lastCommit":"0123456789abcdef0123456789abcdef01234567"}\n' >"$repo/.gitnexus/meta.json"
+mkdir "$work/tmp/claude-graph-gitnexus.lock"
+run --which gitnexus --repo "$repo"
+check 'lock: a fresh lock drops the refresh' "$([ "$(count 'node')" = 0 ]; echo $?)"
+rm -rf "$work/tmp/claude-graph-gitnexus.lock"; mkdir "$work/tmp/claude-graph-gitnexus.lock"
+touch -t 202001010000 "$work/tmp/claude-graph-gitnexus.lock"
+run --which gitnexus --repo "$repo"
+check 'lock: a stale lock (>30 min) is taken over' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
+check 'lock: released after the run' "$([ ! -e "$work/tmp/claude-graph-gitnexus.lock" ]; echo $?)"
+rm -rf "$work/tmp/claude-graph-gitnexus.lock"; : >"$work/tmp/claude-graph-gitnexus.lock"
+touch -t 202001010000 "$work/tmp/claude-graph-gitnexus.lock"
+run --which gitnexus --repo "$repo"
+check 'lock: a stale stray FILE at the lock path does not block refreshes for ever' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
+rm -rf "$work/tmp/claude-graph-gitnexus.lock"
+
+# 7. --detach returns at once while the refresh runs on
+start=$(date +%s)
+NODE_SLEEP=4 run --which gitnexus --repo "$repo" --detach
+elapsed=$(( $(date +%s) - start ))
+check "detach: returned in ${elapsed}s (< 2s) although analyze takes 4s" "$([ $elapsed -lt 2 ]; echo $?)"
+sleep 1
+check 'detach: the detached child did run analyze' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
+sleep 12   # let the 3 slow passes finish before the sandbox is removed
+
+# 8. post-commit.sh
+: >"$calls"
+out=$(cd "$repo" && env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" "$shell" "$postcommit" 2>&1); rc=$?
+check 'post-commit: no refresher installed -> exit 0' "$([ $rc = 0 ]; echo $?)"
+check 'post-commit: no refresher installed -> says so' "$(echo "$out" | grep -q 'not installed'; echo $?)"
+mkdir -p "$work/home/.claude/hooks"
+printf '#!/bin/sh\necho "refresh $*" >>"%s"\n' "$calls" >"$work/home/.claude/hooks/graph-refresh.sh"
+(cd "$repo" && env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" "$shell" "$postcommit"); rc=$?
+check 'post-commit: exit 0' "$([ $rc = 0 ]; echo $?)"
+check 'post-commit: calls the refresher for gitnexus, detached, with this repo' \
+    "$(grep -q "refresh --which gitnexus --repo $(cd "$repo" && pwd -P) --detach" "$calls"; echo $?)"
+
+echo
+echo "  $pass PASS  $fail FAIL"
+[ $fail = 0 ]
