@@ -382,6 +382,99 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckUrls   # 釘住的�
 
 ⚠ **這些會長大，而且長得比想像快。** 本機 2026-10-06 量到：`~/.claude-mem` 2.0 GB（其中 `claude-mem.db` 連 WAL 745 MB）、`~/.claude/projects` 1.9 GB 的逐字稿、`~/.code-review-graph` 31.5 GB（`graph.db` 25.2 GB ＋ WAL 6.3 GB）。換機器之前值得先看一眼。
 
+### 把這些資料夾搬到別的磁碟
+
+⭐ **這是獨立的一次性腳本，`install.ps1` 不會碰它，也不會在更新時幫你做。** 搬動 Claude Code 自己的資料是動別人的家，而且是幾十 GB 的資料；`install.ps1` 的檔頭寫著它只擁有自己的紀錄檔。所以這件事你自己決定、自己執行一次。
+
+想搬的理由通常是上面那張表：`~/.claude`、`~/.claude-mem`、`~/.code-review-graph` 會長到幾十 GB，而系統碟常常是最小的那顆。
+
+**作法是在原位置留一個連結，指向新位置。** 所有工具照樣用舊路徑，完全不需要知道東西搬走了——這個 repo 裡每一條路徑都是 `%USERPROFILE%\.claude\...` 或 `$HOME/.claude/...`，連結是在檔案系統層轉向的。
+
+| 平台 | 用什麼 | 要管理員嗎 |
+|---|---|---|
+| Windows | **junction**（目錄交會點） | **不用** |
+| Windows | symbolic link | 要，或要開啟開發者模式 |
+| macOS | **symbolic link** | **不用**（macOS 沒有 junction，那是 NTFS 的東西） |
+
+⚠ **只對「資料夾」做連結，不要對單一檔案做。** 程式存檔常常是「先寫暫存檔，再改名蓋過去」，改名那一步會把連結換成普通檔案，連結就默默斷了。所以 `~/.claude.json` 是檔案，**不要動它**。
+
+#### 用腳本做
+
+```powershell
+# Windows：先看計畫（Claude Code 開著也能跑，什麼都不動；會先說實際執行會不會被擋、為什麼）
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Target D:\AgentData\.claude -WhatIf
+
+# 目標所在的資料夾要先存在
+mkdir D:\AgentData
+
+# 關掉所有 Claude Code 視窗「和 VS Code」，然後在一般 PowerShell 視窗裡跑
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Target D:\AgentData\.claude
+
+# 搬別的資料夾
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Source $env:USERPROFILE\.claude-mem -Target D:\AgentData\.claude-mem
+```
+
+Windows 版實際搬移前會擋下這幾種情況，什麼都不改：有 Claude Code 在跑；**有任何程式開著來源資料夾裡的檔案**。後面這項不是看程式名稱——它直接試著把資料夾改名再改回來，也就是真正搬移時要做的那個動作，所以 VS Code、`node` 這些名字裡沒有 `claude` 的程式一樣擋得住（本機實測：15 個 `claude`，但另外有 48 個 `Code.exe` 和 52 個 `node.exe`）。
+
+```sh
+# macOS：先看計畫（Claude Code 開著也能跑，什麼都不動；最後會說實際執行會不會被擋、為什麼）
+sh Tools/junction.sh --target /Volumes/Ext/AgentData/.claude --dry-run
+
+# 目標所在的資料夾要先存在
+mkdir -p /Volumes/Ext/AgentData
+
+# 結束所有 Claude Code「和 VS Code」，然後在一般 Terminal 裡跑
+sh Tools/junction.sh --target /Volumes/Ext/AgentData/.claude
+sh Tools/junction.sh --source "$HOME/.claude-mem" --target /Volumes/Ext/AgentData/.claude-mem
+```
+
+macOS 版實際搬移前會擋下這幾種情況，什麼都不改：有 Claude Code 在跑；有任何程式開著來源資料夾裡的檔案（會列出程式名稱和 PID，例如 VS Code 的 `Code Helper` 開著 `settings.json`）；目標磁碟是 exFAT/FAT32；目標磁碟開著「忽略此卷宗的擁有權」。
+
+腳本的步驟，以及為什麼是這個順序：
+
+1. **確認 Claude Code 沒有在跑。** 兩個獨立訊號：`CLAUDECODE` 環境變數（代表你正在 Claude Code *裡面*執行這支腳本，那是最常見的錯誤）和 `claude` 行程數（代表另一個視窗開著，你的環境變數不會知道）。任一個成立就停下來，什麼都不改。
+2. **檢查目標。** 目標不能是來源本身、不能在來源裡面（那會把資料夾複製進自己，永遠複製不完）、不能是已經有東西的資料夾，父目錄必須存在。
+3. **複製過去**（Windows 用 `robocopy`，macOS 用 `ditto`）。
+4. **逐一核對來源與目標**：每個檔案的**相對路徑**和**大小**都要一致。只比數量是不夠的——兩個不同的檔案也能湊出一樣的數量；比大小才抓得到「複製到一半被截斷」。
+5. **把來源改名**（不是刪除），再建立連結，再**透過連結讀一次**確認讀得到同樣的檔案。
+6. **確認無誤後，才刪掉改名的那份。**
+
+⭐ **第 5 步是刻意的。** 直接「刪掉來源再建連結」的話，連結一旦建立失敗就什麼都不剩了。改名的話，到最後一步之前你的資料都還在原處，而且腳本在任何一步失敗都會自動把它改名回來。
+
+#### 自己手動做
+
+```powershell
+# Windows（先關掉 Claude Code）
+robocopy "%USERPROFILE%\.claude" "D:\AgentData\.claude" /E /COPY:DAT
+# 核對沒問題後：
+rename "%USERPROFILE%\.claude" ".claude.old"
+mklink /J "%USERPROFILE%\.claude" "D:\AgentData\.claude"
+```
+
+```sh
+# macOS（先結束 Claude Code）
+ditto "$HOME/.claude" /Volumes/Ext/AgentData/.claude
+mv "$HOME/.claude" "$HOME/.claude.old"
+ln -s /Volumes/Ext/AgentData/.claude "$HOME/.claude"
+```
+
+#### 要注意的事
+
+⚠ **外接碟不在的時候會很難看。** 連結指向不存在的地方，Claude Code 可能會「發現資料夾不見了」就在原處建一個新的空的——**看起來就像設定和記憶全部消失**。其實資料還在外接碟上，只是兩邊分家了。⇒ 盡量用固定磁碟；非用外接碟不可的話，它要一直接著。
+
+⚠ **macOS 的外接碟必須是 APFS 或 HFS+，不能是 exFAT 或 FAT32。** exFAT 沒有 Unix 權限、放不了 symlink，而且 `claude-mem` 和 `code-review-graph` 都用 SQLite，在 exFAT 上的檔案鎖不可靠，資料庫可能損壞。另外在 Finder 的「取得資訊」裡，**「忽略此卷宗的擁有權」要關掉**，否則權限不會生效。`junction.sh` 兩者都會檢查：遇到 exFAT/FAT32，或磁碟開著「忽略擁有權」（`mount` 顯示 `noowners`）就拒絕執行。
+
+⚠ **要還原的話，刪的是「連結」而不是內容。**
+
+```powershell
+rmdir "%USERPROFILE%\.claude"        # 只刪連結。千萬不要加 /S
+```
+```sh
+rm "$HOME/.claude"                   # 只刪連結。千萬不要用 rm -rf
+```
+
+對連結做遞迴刪除會把它指向的**真正資料**清空。
+
 ### 換機器的時候要帶什麼
 
 重裝一次 `install.ps1` 就會回來的：`~/.claude/CLAUDE.md`、`~/.claude/docs/`、`<專案>/.gitnexus/`、`<專案>/.code-review-graph/`、`~/.code-review-graph/`——它們都是從別的東西重建出來的。
@@ -829,6 +922,136 @@ whose only job is to stop an agent confusing them.
 `~/.claude-mem` 2.0 GB (of which `claude-mem.db` with its WAL is 745 MB), `~/.claude/projects`
 1.9 GB of transcripts, `~/.code-review-graph` 31.5 GB (`graph.db` 25.2 GB plus a 6.3 GB WAL).
 Worth a look before moving to a new machine.
+
+### Moving these folders to another drive
+
+⭐ **This is a separate, one-off script. `install.ps1` does not touch it and will not do it
+for you during an update.** Relocating Claude Code's own data is somebody else's house and
+tens of gigabytes of it; `install.ps1` says of itself that it owns one file, its own log. So
+this is something you decide on and run once, by hand.
+
+The reason to want it is the table above: `~/.claude`, `~/.claude-mem` and
+`~/.code-review-graph` grow into tens of gigabytes, and the system drive is often the
+smallest one.
+
+**It works by leaving a link behind at the old path.** Every tool goes on using the old
+path and never needs to know: every path in this repository is `%USERPROFILE%\.claude\...`
+or `$HOME/.claude/...`, and the link redirects at the filesystem level.
+
+| Platform | What to use | Administrator? |
+|---|---|---|
+| Windows | **junction** (directory junction) | **no** |
+| Windows | symbolic link | yes, or Developer Mode |
+| macOS | **symbolic link** | **no** (macOS has no junction — that is an NTFS feature) |
+
+⚠ **Link FOLDERS only, never a single file.** Programs commonly save by writing a temporary
+file and renaming it over the original; the rename replaces the link with an ordinary file
+and the link is silently gone. `~/.claude.json` is a file — **leave it alone**.
+
+#### With the script
+
+```powershell
+# Windows: preview first (works with Claude Code open, changes nothing, and says up front
+# whether a real run would refuse, and why)
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Target D:\AgentData\.claude -WhatIf
+
+# the folder the target goes in must exist
+mkdir D:\AgentData
+
+# close every Claude Code window AND VS Code, then run from a plain PowerShell window
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Target D:\AgentData\.claude
+
+# Move something else
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Source $env:USERPROFILE\.claude-mem -Target D:\AgentData\.claude-mem
+```
+
+Before a real move the Windows script refuses, changing nothing, when: Claude Code is
+running; or **any process has a file open inside the source**. The second is not a check on
+process names — it attempts the very rename the move will need and puts it straight back,
+so VS Code and `node`, neither of which is called `claude`, are caught too (measured on one
+host: 15 `claude`, but also 48 `Code.exe` and 52 `node.exe`).
+
+```sh
+# macOS: preview first (works with Claude Code open, changes nothing, and ends by saying
+# whether a real run would refuse, and why)
+sh Tools/junction.sh --target /Volumes/Ext/AgentData/.claude --dry-run
+
+# the folder the target goes in must exist
+mkdir -p /Volumes/Ext/AgentData
+
+# quit every Claude Code window AND VS Code, then run from a plain Terminal
+sh Tools/junction.sh --target /Volumes/Ext/AgentData/.claude
+sh Tools/junction.sh --source "$HOME/.claude-mem" --target /Volumes/Ext/AgentData/.claude-mem
+```
+
+Before a real move the macOS script refuses, changing nothing, when: Claude Code is running;
+any process has a file open in the source (it names them with their PIDs — VS Code's `Code
+Helper` holding `settings.json` is the usual one); the target disk is exFAT/FAT32; or the
+target disk has "Ignore ownership on this volume" ticked.
+
+What it does, and why in that order:
+
+1. **Checks Claude Code is not running.** Two independent signals: the `CLAUDECODE`
+   environment variable (you are running this *inside* Claude Code, the likeliest mistake)
+   and the `claude` process count (a session open in another window, which your own
+   environment knows nothing about). Either one stops the run, changing nothing.
+2. **Checks the target.** It may not be the source, may not be inside the source (that
+   copies a folder into itself, for ever), may not be a folder that already has things in
+   it, and its parent must exist.
+3. **Copies** — `robocopy` on Windows, `ditto` on macOS.
+4. **Compares source and target file by file**: every **relative path** and every **size**
+   must match. A count alone is not enough — two different files make the same count — and
+   only the sizes catch a file that arrived truncated.
+5. **Renames the original** (does not delete it), creates the link, then **reads back
+   through the link** and checks it finds the same files.
+6. **Only then deletes the renamed copy.**
+
+⭐ **Step 5 is deliberate.** Delete-then-link leaves nothing to go back to if the link
+fails. Renaming means your data still exists under its old name until the very last step,
+and a failure at any point renames it straight back.
+
+#### By hand
+
+```powershell
+# Windows (close Claude Code first)
+robocopy "%USERPROFILE%\.claude" "D:\AgentData\.claude" /E /COPY:DAT
+# after checking it copied:
+rename "%USERPROFILE%\.claude" ".claude.old"
+mklink /J "%USERPROFILE%\.claude" "D:\AgentData\.claude"
+```
+
+```sh
+# macOS (quit Claude Code first)
+ditto "$HOME/.claude" /Volumes/Ext/AgentData/.claude
+mv "$HOME/.claude" "$HOME/.claude.old"
+ln -s /Volumes/Ext/AgentData/.claude "$HOME/.claude"
+```
+
+#### What to watch out for
+
+⚠ **A missing external disk looks like catastrophe.** The link points at nothing, and
+Claude Code may decide the folder is gone and create a new, empty one — which looks exactly
+like losing every setting and all your history. The data is still on the external disk; the
+two have simply parted company. ⇒ Prefer a fixed disk; if it must be external, keep it
+attached.
+
+⚠ **On macOS an external disk must be APFS or HFS+, never exFAT or FAT32.** exFAT has no
+Unix permissions and cannot hold symlinks, and both `claude-mem` and `code-review-graph` use
+SQLite, whose file locking is unreliable there — the database can corrupt. Also, in Finder's
+Get Info for the disk, **"Ignore ownership on this volume" must be off**, or permissions do
+not apply. `junction.sh` checks both: it refuses on exFAT/FAT32, and on a disk with
+ownership ignored (`noowners` in `mount`).
+
+⚠ **To undo it, delete the LINK, not the contents.**
+
+```powershell
+rmdir "%USERPROFILE%\.claude"        # the link only. NEVER add /S
+```
+```sh
+rm "$HOME/.claude"                   # the link only. NEVER rm -rf
+```
+
+A recursive delete through a link empties the **real data** it points at.
 
 ### What to carry to a new machine
 
