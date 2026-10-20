@@ -1149,6 +1149,9 @@ $script:prevConsoleEncoding = $null
 # test that reads it is reading a variable, not relying on an unassigned one being
 # $null - which is the same answer right up until somebody adds Set-StrictMode.
 $script:coworkAsked = $false
+# Rows the gate decided to install as portable copies. Filled by the gate, consumed
+# AFTER the summary's go-ahead - see both sites.
+$script:portableRows = @()
 # Collected by phase 2b and read by the closing advice, so a failed extension is
 # named there rather than scrolling past in the middle of the run.
 $extFailed = @()
@@ -2052,13 +2055,30 @@ function Invoke-SelfTest {
         $meSrc = [System.IO.File]::ReadAllLines($PSCommandPath)
     }
     if ($meSrc) {
-        $qDrive    = Find-SourceLine $meSrc 'Read-DriveChoice -Candidates'
-        $qCowork   = Find-SourceLine $meSrc '$Cowork = Read-YesNoAnswer'
-        $qPortable = Find-SourceLine $meSrc '$Portable = Read-YesNoAnswer'
-        $firstInst = Find-SourceLine $meSrc 'Install-PortableDependency $b'
+        # ⛔ EVERY NEEDLE IS GLUED AT RUNTIME, AND THAT IS NOT TIDINESS. Written as plain
+        # literals, these four lines ARE the first occurrence of what they search for, so
+        # Find-SourceLine returned the line numbers of the SELF-TEST instead of the code -
+        # and the comparisons below then measured this block against itself. Measured
+        # 2026-10-20: every ordering case passed while testing nothing, until one of them
+        # happened to fail and exposed it. A scan that can match its own source is a scan
+        # that reports on the wrong file.
+        $qDrive    = Find-SourceLine $meSrc ('Read-DriveChoice ' + '-Candidates')
+        $qCowork   = Find-SourceLine $meSrc ('$Cowork = ' + 'Read-YesNoAnswer')
+        $qPortable = Find-SourceLine $meSrc ('$Portable = ' + 'Read-YesNoAnswer')
+        $firstInst = Find-SourceLine $meSrc ('Install-PortableDependency ' + '$b')
 
         # The control: without it, a finder that matched nothing would return 0 on both
         # sides and every comparison below would pass by being equally empty.
+        # The finder must ignore a comment that merely mentions the needle, or a line of
+        # prose above the code would be reported as the code's position.
+        # ⚠ The probe's own lines are glued too. Written plainly they BECAME the first
+        # occurrence of the needle, so the real scan found this test instead of the code -
+        # measured, immediately after gluing the needles above. The fixture has to be as
+        # careful as the thing it is testing.
+        $probeNeedle = 'Install-PortableDependency ' + '$b'
+        $probeLines = @(('# mentions ' + $probeNeedle + ' in prose'), ('    ' + $probeNeedle))
+        Check 'order: control - the finder skips a comment and finds the code' `
+            ((Find-SourceLine $probeLines $probeNeedle) -eq 2)
         Check 'order: control - all four landmarks were actually found' `
             (($qDrive -gt 0) -and ($qCowork -gt 0) -and ($qPortable -gt 0) -and ($firstInst -gt 0))
         Check 'order: the drive question comes before any install'    ($qDrive -lt $firstInst)
@@ -2068,6 +2088,19 @@ function Invoke-SelfTest {
         # stopping is cheaper after two answers than after an install.
         Check 'order: drive and Cowork are asked before the gate question' `
             (($qDrive -lt $qPortable) -and ($qCowork -lt $qPortable))
+
+        # ⛔ AND THE GO-AHEAD COMES BEFORE EVERY INSTALL (owner, 2026-10-20: 問完問題之後
+        # 要給 Summary 確認才正式開始). The portable install used to be the FIRST thing the
+        # run did, inside the gate - so the summary, wherever it was printed, described a
+        # run that had already started. It is deferred now, and this is what keeps it so.
+        $qGo = Find-SourceLine $meSrc ('$go = ' + 'Read-YesNoAnswer')
+        $anyInst = Find-SourceLine $meSrc ('Install-Dependency ' + '(')
+        Check 'order: control - the go-ahead and a real install were both found' `
+            (($qGo -gt 0) -and ($anyInst -gt 0))
+        Check 'order: the go-ahead comes before the portable install' ($qGo -lt $firstInst)
+        Check 'order: the go-ahead comes before any other install'    ($qGo -lt $anyInst)
+        Check 'order: every question is answered before the go-ahead' `
+            (($qDrive -lt $qGo) -and ($qCowork -lt $qGo) -and ($qPortable -lt $qGo))
 
         # No prompt may count down any more: a timed question answers itself for somebody
         # who looked away. Both helpers keep $Seconds in their signature, so the thing to
@@ -3288,32 +3321,14 @@ if (-not $SkipDeps) {
         }
 
         if ($cand.Offerable -and ($Portable -eq 'yes') -and (-not $CheckOnly)) {
-            Write-Phase "Portable toolchain, in your own profile"
-            foreach ($b in $cand.Rows) {
-                Write-Host ""
-                Write-Host "   installing $($b.Name) as a portable copy" -ForegroundColor Cyan
-                Install-PortableDependency $b
-            }
-            Update-PathFromRegistry
-            # Read them BACK. An archive that expanded without error and left the tool
-            # somewhere else would otherwise be discovered four phases later.
-            # Named locals rather than inline calls, so this re-check does not read as a
-            # byte-identical twin of the gate's own call twenty lines up - two identical
-            # call sites make every mutation aimed at one of them ambiguous, which the
-            # mutation suite reports as NOT APPLIED rather than silently testing nothing.
-            $afterMissing = Get-MissingDependency $DEPS
-            $afterPwsh7 = [bool] (Get-Pwsh7Path)
-            $stillBlocked = @(Select-AdminBlocker -Deps $DEPS -Missing $afterMissing `
-                                -Pwsh7Found $afterPwsh7 -Elevated (Test-IsElevated))
-            if ($stillBlocked.Count -gt 0) {
-                Write-Host ""
-                Write-Host "   STILL missing after the portable install: $(($stillBlocked | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Red
-                Write-Host "   Close this terminal and run the script again so PATH is rebuilt" -ForegroundColor Red
-                Write-Host "   from scratch. If that does not help, the archive layout has changed." -ForegroundColor Red
-                Stop-Run 1
-            }
+            # ⛔ DECIDED HERE, INSTALLED LATER. The summary and its confirmation have to
+            # come before ANY work (owner, 2026-10-20: 問完問題之後要給 Summary 確認才正式
+            # 開始), and this used to be the very first thing installed - so the person
+            # confirmed a run that had already begun. The rows are remembered and the
+            # install happens after Confirm-Start, which every path reaches.
+            $script:portableRows = @($cand.Rows)
             Write-Host ""
-            Write-Host "   done - carrying on with the rest of the install." -ForegroundColor Green
+            Write-Host "   portable copies will be installed once you confirm." -ForegroundColor Green
             # Fall through. $gateBlockers is spent; the run continues as a normal one.
         }
         else {
@@ -3365,6 +3380,97 @@ if (-not $SkipDeps) {
             }
         }
     }
+}
+
+# ------------------------------------------------- the summary, and the go-ahead
+# ⛔ EVERY QUESTION IS ANSWERED ABOVE; NOTHING HAS BEEN INSTALLED YET. This is the last
+# thing between the person and a run that does not stop again (owner, 2026-10-20: 問完問題
+# 之後要給 Summary 確認才正式開始). It restates the answers rather than assuming they were
+# read back correctly - a drive chosen by pressing a letter, and a Y/N that scrolled past,
+# are exactly the two that are worth showing again before forty minutes of installing.
+#
+# ⚠ It is placed HERE because every path reaches it: an administrator falls straight
+# through the gate, and a standard user who accepted portable copies has had that install
+# DEFERRED to just below. A run that cannot proceed has already stopped inside the gate.
+if (-not $CheckOnly) {
+    Write-Phase 'Summary - nothing has been installed yet'
+    Write-Host ""
+    Write-Host "   WorkSpace            : $WORKSPACE_ROOT"
+    if (Test-IsClone $here) {
+        Write-Host "   this copy            : already a clone, so nothing is cloned"
+    }
+    $elevNow = Test-IsElevated
+    Write-Host ("   running as           : {0}\{1}{2}" -f $env:USERDOMAIN, $env:USERNAME,
+                $(if ($elevNow) { '  (administrator)' } else { '  (no administrator rights)' }))
+    if ($script:portableRows -and $script:portableRows.Count -gt 0) {
+        Write-Host ("   portable copies      : {0}" -f (($script:portableRows | ForEach-Object { $_.Name }) -join ', '))
+        Write-Host "                          into $PORTABLE_ROOT"
+    }
+    $sumMissing = Get-MissingDependency $DEPS
+    $sumSkip = @(Select-SkippableRow $sumMissing $elevNow)
+    $sumInstall = @($sumMissing | Where-Object { $n = $_.Name
+        (@($sumSkip | ForEach-Object { $_.Name }) -notcontains $n) -and
+        (@($script:portableRows | ForEach-Object { $_.Name }) -notcontains $n) })
+    if ($sumInstall.Count -gt 0) {
+        Write-Host ("   will install         : {0}" -f (($sumInstall | ForEach-Object { $_.Name }) -join ', '))
+    }
+    else {
+        Write-Host "   will install         : nothing - every tool is already here"
+    }
+    if ($sumSkip.Count -gt 0) {
+        Write-Host ("   will SKIP            : {0}" -f (($sumSkip | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
+        Write-Host "                          (need an administrator, and nothing here depends on them)" -ForegroundColor Yellow
+    }
+    Write-Host ("   claude-mem Cowork    : {0}" -f $(if ($Cowork -eq 'yes') { 'YES - sends tool use to cmem.ai' } else { 'no' }))
+    Write-Host "   log                  : $script:logFile"
+    Write-Host ""
+    Write-Host "   From here it runs to the end without asking anything else."
+    Write-Host ""
+
+    if ([Console]::IsInputRedirected) {
+        Write-Host "   stdin is not a terminal, so there is nobody to confirm: starting." -ForegroundColor Yellow
+    }
+    else {
+        $go = Read-YesNoAnswer 0 `
+            -Prompt 'Start? (Y/N, empty = N)' `
+            -FlagHint 'There is nothing to pass: an unattended run (stdin not a terminal) starts by itself.' `
+            -YesText 'starting.' `
+            -NoText 'cancelled - nothing was installed.'
+        if ($go -ne 'yes') {
+            Write-Host ""
+            Write-Host "   Cancelled. Nothing was installed." -ForegroundColor Green
+            Stop-Run 0
+        }
+    }
+}
+
+# The portable install, deferred out of the administrator gate so that it happens AFTER
+# the go-ahead above rather than being the first thing the run does.
+if ($script:portableRows -and $script:portableRows.Count -gt 0) {
+    Write-Phase "Portable toolchain, in your own profile"
+    foreach ($b in $script:portableRows) {
+        Write-Host ""
+        Write-Host "   installing $($b.Name) as a portable copy" -ForegroundColor Cyan
+        Install-PortableDependency $b
+    }
+    Update-PathFromRegistry
+    # Read them BACK. An archive that expanded without error and left the tool somewhere
+    # else would otherwise be discovered four phases later. Named locals rather than inline
+    # calls, so this re-check is not a byte-identical twin of the gate's own call - two
+    # identical call sites make every mutation aimed at one of them ambiguous.
+    $afterMissing = Get-MissingDependency $DEPS
+    $afterPwsh7 = [bool] (Get-Pwsh7Path)
+    $stillBlocked = @(Select-AdminBlocker -Deps $DEPS -Missing $afterMissing `
+                        -Pwsh7Found $afterPwsh7 -Elevated (Test-IsElevated))
+    if ($stillBlocked.Count -gt 0) {
+        Write-Host ""
+        Write-Host "   STILL missing after the portable install: $(($stillBlocked | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Red
+        Write-Host "   Close this terminal and run the script again so PATH is rebuilt" -ForegroundColor Red
+        Write-Host "   from scratch. If that does not help, the archive layout has changed." -ForegroundColor Red
+        Stop-Run 1
+    }
+    Write-Host ""
+    Write-Host "   done - carrying on with the rest of the install." -ForegroundColor Green
 }
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
