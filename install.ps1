@@ -881,6 +881,22 @@ function Add-MissingPathEntry {
     return "$Directory;$PathValue"
 }
 
+function Find-SourceLine {
+    <#
+      The 1-based line number of the first NON-COMMENT line containing $Needle, or 0.
+
+      Comments are skipped deliberately: this file documents its own landmarks in prose,
+      and a comment that mentions `Install-PortableDependency` would otherwise be found
+      before the call itself and make an ordering check pass for the wrong reason.
+    #>
+    param([string[]] $Lines, [string] $Needle)
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i].TrimStart().StartsWith('#')) { continue }
+        if ($Lines[$i] -like "*$Needle*") { return $i + 1 }
+    }
+    return 0
+}
+
 function Update-PathFromRegistry {
     # An installer edits the machine/user PATH, but THIS process inherited the old
     # one. Rebuilding it in-process is what removes the "now re-open your terminal"
@@ -1011,40 +1027,20 @@ function Read-DriveChoice {
     }
     try { $Host.UI.RawUI.FlushInputBuffer() } catch { }
 
-    $timed = $true
-    try { $null = $Host.UI.RawUI.KeyAvailable } catch { $timed = $false }
-    if (-not $timed) {
-        while ($true) {
-            $typed = Read-Host "   drive letter (empty = $Default)"
-            if ($typed.Trim() -eq '') { return $Default }
-            $pick = $typed.Trim().Substring(0, 1).ToUpperInvariant()
-            if ($letters -contains $pick) { return $pick }
-            Write-Host "   $pick is not on the list." -ForegroundColor Yellow
-        }
+    # ⛔ NO COUNTDOWN. It WAITS (owner, 2026-10-20: 不要在腳本中間才跳出問句且有時間限制,
+    # 這樣容易忽略而沒有回應到問題導致安裝錯誤). A timed prompt that auto-answers is the worst
+    # of both worlds: somebody who looked away gets an answer they did not give, and the run
+    # carries on as though they had. $Seconds is still accepted so no caller breaks, and is
+    # deliberately unused - a run with nobody at the keyboard has already returned above,
+    # on the stdin-is-not-a-terminal path, which is what makes -Drive/-Portable/-Cowork
+    # unattended runs work.
+    while ($true) {
+        $typed = Read-Host "   drive letter (empty = $Default)"
+        if ($typed.Trim() -eq '') { return $Default }
+        $pick = $typed.Trim().Substring(0, 1).ToUpperInvariant()
+        if ($letters -contains $pick) { return $pick }
+        Write-Host "   $pick is not on the list." -ForegroundColor Yellow
     }
-
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    while ((Get-Date) -lt $deadline) {
-        if ($Host.UI.RawUI.KeyAvailable) {
-            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-            $ch = ([string] $key.Character).ToUpperInvariant()
-            if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 27) {
-                Write-Host "`r   using $Default                                                  " -ForegroundColor Green
-                return $Default
-            }
-            if ($letters -contains $ch) {
-                Write-Host "`r   $ch - WorkSpace will be created on $ch`:                        " -ForegroundColor Yellow
-                return $ch
-            }
-        }
-        else {
-            $left = [int] [Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
-            Write-Host ("`r   press a letter - {0,2}s left, and no answer means {1} ... " -f $left, $Default) -NoNewline
-            Start-Sleep -Milliseconds 200
-        }
-    }
-    Write-Host "`r   no answer in $Seconds seconds - using $Default.                   " -ForegroundColor Green
-    return $Default
 }
 
 function Read-YesNoAnswer {
@@ -1076,42 +1072,18 @@ function Read-YesNoAnswer {
 
     try { $Host.UI.RawUI.FlushInputBuffer() } catch { }
 
-    # Not every host has a readable key queue. Where there is none, there is no
-    # countdown either - block and wait, which is better than guessing.
-    $timed = $true
-    try { $null = $Host.UI.RawUI.KeyAvailable } catch { $timed = $false }
-
-    if (-not $timed) {
-        while ($true) {
-            $typed = Read-Host "   $Prompt"
-            if ($typed.Trim() -eq '') { return 'no' }
-            $answer = ConvertTo-YesNo $typed.Trim().Substring(0, 1)
-            if ($answer) { return $answer }
-        }
+    # ⛔ NO COUNTDOWN - IT WAITS (owner, 2026-10-20). A prompt that answers itself after
+    # thirty seconds is how somebody ends up with an install they did not choose: they look
+    # away, the default is taken, and nothing says so afterwards. A run with nobody at the
+    # keyboard has already returned above on the stdin-is-not-a-terminal path, so blocking
+    # here costs an unattended run nothing. $Seconds is kept in the signature so no caller
+    # breaks, and is deliberately unused.
+    while ($true) {
+        $typed = Read-Host "   $Prompt"
+        if ($typed.Trim() -eq '') { return 'no' }
+        $answer = ConvertTo-YesNo $typed.Trim().Substring(0, 1)
+        if ($answer) { return $answer }
     }
-
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    while ((Get-Date) -lt $deadline) {
-        if ($Host.UI.RawUI.KeyAvailable) {
-            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-            $answer = ConvertTo-YesNo ([string] $key.Character) $key.VirtualKeyCode
-            if ($answer -eq 'yes') {
-                Write-Host "`r   Y - $YesText                                                         " -ForegroundColor Yellow
-                return 'yes'
-            }
-            if ($answer -eq 'no') {
-                Write-Host "`r   N - $NoText                                                          " -ForegroundColor Green
-                return 'no'
-            }
-        }
-        else {
-            $left = [int] [Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
-            Write-Host ("`r   press Y or N - {0,2}s left, and no answer means N ... " -f $left) -NoNewline
-            Start-Sleep -Milliseconds 200
-        }
-    }
-    Write-Host "`r   no answer in $Seconds seconds - $NoText                              " -ForegroundColor Green
-    return 'no'
 }
 
 function Test-PluginKeyMatch {
@@ -2068,6 +2040,50 @@ function Invoke-SelfTest {
             Where-Object { $_ -eq $p7 }).Count -eq 1)
     Check 'rebuild: no PowerShell 7 found means no entry is invented' `
         ((Build-ProcessPath $machineNoPwsh 'C:\Users\u\bin' '') -eq "$machineNoPwsh;C:\Users\u\bin")
+
+    # ⛔ EVERY QUESTION BEFORE EVERY INSTALL - asserted against THIS FILE'S OWN SOURCE,
+    # because the property is about ORDER and no unit test over a function can see it.
+    # Owner, 2026-10-20: ask everything at the start, then run unattended to the end. The
+    # gate used to install portable copies the moment its question was answered while two
+    # further questions were still to come, so somebody who answered one and walked away
+    # was asked twice more into an empty room.
+    $meSrc = $null
+    if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+        $meSrc = [System.IO.File]::ReadAllLines($PSCommandPath)
+    }
+    if ($meSrc) {
+        $qDrive    = Find-SourceLine $meSrc 'Read-DriveChoice -Candidates'
+        $qCowork   = Find-SourceLine $meSrc '$Cowork = Read-YesNoAnswer'
+        $qPortable = Find-SourceLine $meSrc '$Portable = Read-YesNoAnswer'
+        $firstInst = Find-SourceLine $meSrc 'Install-PortableDependency $b'
+
+        # The control: without it, a finder that matched nothing would return 0 on both
+        # sides and every comparison below would pass by being equally empty.
+        Check 'order: control - all four landmarks were actually found' `
+            (($qDrive -gt 0) -and ($qCowork -gt 0) -and ($qPortable -gt 0) -and ($firstInst -gt 0))
+        Check 'order: the drive question comes before any install'    ($qDrive -lt $firstInst)
+        Check 'order: the Cowork question comes before any install'   ($qCowork -lt $firstInst)
+        Check 'order: the portable question comes before any install' ($qPortable -lt $firstInst)
+        # The gate is last of the three because it is the one that can STOP the run, and
+        # stopping is cheaper after two answers than after an install.
+        Check 'order: drive and Cowork are asked before the gate question' `
+            (($qDrive -lt $qPortable) -and ($qCowork -lt $qPortable))
+
+        # No prompt may count down any more: a timed question answers itself for somebody
+        # who looked away. Both helpers keep $Seconds in their signature, so the thing to
+        # look for is the countdown text, not the parameter.
+        # ⛔ THE NEEDLE IS GLUED AT RUNTIME SO THIS LINE CANNOT MATCH ITSELF. Written as
+        # one literal, the scan found its own source and reported a countdown that was not
+        # there - measured, and the same self-match this file's other source scans already
+        # carry a comment about.
+        $needle = '*s left, and no ' + 'answer means*'
+        $countdown = @($meSrc | Where-Object { $_ -like $needle })
+        Check 'order: no prompt counts down any more' ($countdown.Count -eq 0)
+        # The lookalike: the scan must still FIND a countdown if one is reintroduced.
+        $probe = @(@('   press Y or N - 12s left, and no ' + 'answer means N ... ') |
+                   Where-Object { $_ -like $needle })
+        Check 'order: control - the countdown scan still fires on a real one' ($probe.Count -eq 1)
+    }
 
     # And the live wiring, as a smoke test. ⚠ This one CANNOT fail on a host whose registry
     # already lists PowerShell 7 - see above - so it is deliberately not the case the
@@ -3103,6 +3119,81 @@ if ((-not $NoUpdate) -and (Test-IsClone $here)) {
     }
 }
 
+# ------------------------------------------------------------- which drive (2026-10-14)
+# ⛔ ONLY WHEN A CLONE IS ACTUALLY GOING TO HAPPEN. $WORKSPACE_ROOT is used for exactly one
+# thing - where the bootstrap puts the repository - so a run started from inside a clone
+# has nothing to decide and is not asked. Asking anyway would be a question with no
+# consequence, which teaches people to press Enter without reading.
+#
+# Before the plan block below, so the plan can print the real path rather than a guess.
+if (-not (Test-IsClone $here)) {
+    $driveCandidates = Get-WritableDrive
+    $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
+    if (-not $resolved.Root) {
+        Write-Host ""
+        Write-Host "Cannot choose where to put WorkSpace: $($resolved.Reason)" -ForegroundColor Red
+        Stop-Run 1
+    }
+    $defaultLetter = $resolved.Root.Substring(0, 1)
+    # Asked only when nobody has answered and there is more than one answer to give. One
+    # writable drive is not a choice, and -CheckOnly writes nothing so it may not create
+    # anything either - both take the default and say so.
+    if ((-not $Drive) -and (-not $CheckOnly) -and (@($driveCandidates).Count -gt 1)) {
+        $Drive = Read-DriveChoice -Candidates $driveCandidates -Default $defaultLetter
+        $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
+    }
+    $WORKSPACE_ROOT = $resolved.Root
+}
+
+# --------------------------------------------------- the plan, and the one question
+# ASKED HERE, BEFORE ANYTHING IS INSTALLED, and never again later in the run. A
+# question raised forty minutes in, behind a third-party installer's output, is a
+# question nobody is still sitting there to answer.
+#
+# Printed only when there is actually something to ask. Given -Cowork explicitly
+# there is nothing to decide, and the PowerShell 7 child is always given it
+# explicitly - which is what stops this block running twice in one run.
+if ($Cowork -eq 'ask' -and -not $CheckOnly) {
+    Write-Host ""
+    Write-Host "This run will, in order:" -ForegroundColor Cyan
+    Write-Host "   1. install PowerShell 7 if it is missing, and continue under it"
+    if (-not (Test-IsClone $here)) {
+        Write-Host "      then, because this file was downloaded on its own: install Git for"
+        Write-Host "      Windows, clone $REPO_URL into"
+        Write-Host "      $(Join-Path $WORKSPACE_ROOT 'dev-workstation') and carry on from that copy"
+    }
+    Write-Host "   2. install any MISSING tool, in this order:"
+    Write-Host "      $(($DEPS | Where-Object { $_.Name -ne 'pwsh' } | ForEach-Object { $_.Name }) -join ', ')"
+    Write-Host "   3. place the CLAUDE.md instruction files (Tools\deploy.py)"
+    Write-Host "   4. install GitNexus and code-review-graph, their MCP entries and hooks"
+    Write-Host "   5. install claude-mem - LOCAL cross-session memory, nothing uploaded"
+    Write-Host "   6. install the Claude Code plugins: $(($PLUGINS | ForEach-Object { $_.Name }) -join ', ')"
+    Write-Host "      (dispatch-guard also adds a statusline and a usage watcher, machine-wide)"
+    Write-Host "   Anything already installed is left alone, never replaced."
+    Write-Host ""
+    Write-Host "One optional extra - and this is the only question this script asks:" -ForegroundColor Cyan
+    Write-Host "   claude-mem Cowork  (claude-mem-cowork@thedotmack)"
+    Write-Host "   Its own marketplace entry describes it as: 'Claude-Mem for Cowork"
+    Write-Host "   (Claude app cloud sessions) - hooks stream tool use to cmem.ai and"
+    Write-Host "   inject observations into new sessions and agents'."
+    Write-Host "   It therefore SENDS YOUR TOOL USE TO AN EXTERNAL SERVICE (cmem.ai)." -ForegroundColor Yellow
+    Write-Host "   Step 5's local claude-mem does not, and does not need this. Default: N."
+    Write-Host ""
+    $Cowork = Read-YesNoAnswer 30
+    $script:coworkAsked = $true
+}
+
+# ⛔ EVERY QUESTION IS ASKED BEFORE THIS POINT, AND NOTHING IS INSTALLED UNTIL THEY ARE
+# ALL ANSWERED (owner, 2026-10-20: 「腳本中所有問題要在腳本一開始的時候就先問完，後面就
+# 可以 unattended 的方式做到結束」). The drive question and the Cowork question used to sit
+# AFTER the administrator gate - and the gate installs portable copies as soon as its own
+# question is answered, so the real sequence was ask, INSTALL, ask, ask. A question that
+# arrives after an install has started is a question somebody has already walked away from.
+#
+# ⇒ Order is now: which drive, then Cowork, then the gate's portable question, then the
+# whole run with no further prompt. The gate stays last of the three because it is the one
+# that may STOP the run, and stopping is cheaper after two answers than after an install.
+
 # --------------------------------------------------------- the administrator gate
 # ⛔ FIRST, BEFORE THE QUESTION AND BEFORE THE FIRST DOWNLOAD. What a standard user
 # used to get was a raw MSI exit code, after a 112 MB download, with the word
@@ -3274,70 +3365,6 @@ if (-not $SkipDeps) {
             }
         }
     }
-}
-
-# ------------------------------------------------------------- which drive (2026-10-14)
-# ⛔ ONLY WHEN A CLONE IS ACTUALLY GOING TO HAPPEN. $WORKSPACE_ROOT is used for exactly one
-# thing - where the bootstrap puts the repository - so a run started from inside a clone
-# has nothing to decide and is not asked. Asking anyway would be a question with no
-# consequence, which teaches people to press Enter without reading.
-#
-# Before the plan block below, so the plan can print the real path rather than a guess.
-if (-not (Test-IsClone $here)) {
-    $driveCandidates = Get-WritableDrive
-    $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
-    if (-not $resolved.Root) {
-        Write-Host ""
-        Write-Host "Cannot choose where to put WorkSpace: $($resolved.Reason)" -ForegroundColor Red
-        Stop-Run 1
-    }
-    $defaultLetter = $resolved.Root.Substring(0, 1)
-    # Asked only when nobody has answered and there is more than one answer to give. One
-    # writable drive is not a choice, and -CheckOnly writes nothing so it may not create
-    # anything either - both take the default and say so.
-    if ((-not $Drive) -and (-not $CheckOnly) -and (@($driveCandidates).Count -gt 1)) {
-        $Drive = Read-DriveChoice -Candidates $driveCandidates -Default $defaultLetter
-        $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
-    }
-    $WORKSPACE_ROOT = $resolved.Root
-}
-
-# --------------------------------------------------- the plan, and the one question
-# ASKED HERE, BEFORE ANYTHING IS INSTALLED, and never again later in the run. A
-# question raised forty minutes in, behind a third-party installer's output, is a
-# question nobody is still sitting there to answer.
-#
-# Printed only when there is actually something to ask. Given -Cowork explicitly
-# there is nothing to decide, and the PowerShell 7 child is always given it
-# explicitly - which is what stops this block running twice in one run.
-if ($Cowork -eq 'ask' -and -not $CheckOnly) {
-    Write-Host ""
-    Write-Host "This run will, in order:" -ForegroundColor Cyan
-    Write-Host "   1. install PowerShell 7 if it is missing, and continue under it"
-    if (-not (Test-IsClone $here)) {
-        Write-Host "      then, because this file was downloaded on its own: install Git for"
-        Write-Host "      Windows, clone $REPO_URL into"
-        Write-Host "      $(Join-Path $WORKSPACE_ROOT 'dev-workstation') and carry on from that copy"
-    }
-    Write-Host "   2. install any MISSING tool, in this order:"
-    Write-Host "      $(($DEPS | Where-Object { $_.Name -ne 'pwsh' } | ForEach-Object { $_.Name }) -join ', ')"
-    Write-Host "   3. place the CLAUDE.md instruction files (Tools\deploy.py)"
-    Write-Host "   4. install GitNexus and code-review-graph, their MCP entries and hooks"
-    Write-Host "   5. install claude-mem - LOCAL cross-session memory, nothing uploaded"
-    Write-Host "   6. install the Claude Code plugins: $(($PLUGINS | ForEach-Object { $_.Name }) -join ', ')"
-    Write-Host "      (dispatch-guard also adds a statusline and a usage watcher, machine-wide)"
-    Write-Host "   Anything already installed is left alone, never replaced."
-    Write-Host ""
-    Write-Host "One optional extra - and this is the only question this script asks:" -ForegroundColor Cyan
-    Write-Host "   claude-mem Cowork  (claude-mem-cowork@thedotmack)"
-    Write-Host "   Its own marketplace entry describes it as: 'Claude-Mem for Cowork"
-    Write-Host "   (Claude app cloud sessions) - hooks stream tool use to cmem.ai and"
-    Write-Host "   inject observations into new sessions and agents'."
-    Write-Host "   It therefore SENDS YOUR TOOL USE TO AN EXTERNAL SERVICE (cmem.ai)." -ForegroundColor Yellow
-    Write-Host "   Step 5's local claude-mem does not, and does not need this. Default: N."
-    Write-Host ""
-    $Cowork = Read-YesNoAnswer 30
-    $script:coworkAsked = $true
 }
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
