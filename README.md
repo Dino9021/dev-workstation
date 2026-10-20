@@ -404,15 +404,21 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckUrls   # 釘住的�
 # Windows：先看計畫（Claude Code 開著也能跑，什麼都不動；會先說實際執行會不會被擋、為什麼）
 powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Target D:\AgentData\.claude -WhatIf
 
-# 目標所在的資料夾要先存在
-mkdir D:\AgentData
+# 關掉所有 Claude Code 視窗「和 VS Code」，然後在一般 PowerShell 視窗裡跑。
+# 不給路徑的話，它會列出可寫入的磁碟讓你選，再搬到 {你選的磁碟}:\WorkSpace\.claude
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1
 
-# 關掉所有 Claude Code 視窗「和 VS Code」，然後在一般 PowerShell 視窗裡跑
+# 不想被問就直接指定磁碟
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Drive E
+
+# 或是完全自己指定路徑（這條路它不會幫你建上層資料夾）
 powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Target D:\AgentData\.claude
 
-# 搬別的資料夾
-powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Source $env:USERPROFILE\.claude-mem -Target D:\AgentData\.claude-mem
+# 搬別的資料夾：名稱會保留，所以不會跟前一個撞在一起
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Source $env:USERPROFILE\.claude-mem -Drive E
 ```
+
+⭐ **預設位置跟 `install.ps1` 一致。** 不指定 `-Target` 的時候，它會問你要哪個磁碟（只列出這個帳號**真的能**在根目錄建資料夾的磁碟），然後搬到 **`{磁碟}:\WorkSpace\.claude`**。資料夾原本的名字會保留，所以之後再搬 `.claude-mem` 會進到 `{磁碟}:\WorkSpace\.claude-mem`，不會互相覆蓋。你沒選的話，它優先挑**已經有 `WorkSpace` 的那顆磁碟**（`install.ps1` 把專案放在那裡，兩邊不該各走各的），其次 C，再其次第一個可寫入的磁碟。走這條路它會自己建 `WorkSpace` 資料夾；但你用 `-Target` 自己指定的路徑是你的責任，上層資料夾要先建好。
 
 Windows 版實際搬移前會擋下這幾種情況，什麼都不改：有 Claude Code 在跑；**有任何程式開著來源資料夾裡的檔案**。後面這項不是看程式名稱——它直接試著把資料夾改名再改回來，也就是真正搬移時要做的那個動作，所以 VS Code、`node` 這些名字裡沒有 `claude` 的程式一樣擋得住（本機實測：15 個 `claude`，但另外有 48 個 `Code.exe` 和 52 個 `node.exe`）。
 
@@ -955,15 +961,29 @@ and the link is silently gone. `~/.claude.json` is a file — **leave it alone**
 # whether a real run would refuse, and why)
 powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Target D:\AgentData\.claude -WhatIf
 
-# the folder the target goes in must exist
-mkdir D:\AgentData
+# close every Claude Code window AND VS Code, then run from a plain PowerShell window.
+# With no path given it lists the writable drives, asks which one, and moves the folder
+# to {that drive}:\WorkSpace\.claude
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1
 
-# close every Claude Code window AND VS Code, then run from a plain PowerShell window
+# name the drive instead of being asked
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Drive E
+
+# or give a path of your own (this route does NOT create the parent for you)
 powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Target D:\AgentData\.claude
 
-# Move something else
-powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Source $env:USERPROFILE\.claude-mem -Target D:\AgentData\.claude-mem
+# Move something else: the folder keeps its name, so it cannot collide with the first
+powershell -ExecutionPolicy Bypass -File Tools\junction.ps1 -Source $env:USERPROFILE\.claude-mem -Drive E
 ```
+
+⭐ **The default destination is the same place `install.ps1` uses.** With no `-Target`, the
+script asks which drive (listing only the drives this account can **actually** create a
+folder on) and moves the folder to **`{drive}:\WorkSpace\.claude`**. The folder keeps its
+own name, so moving `.claude-mem` later lands at `{drive}:\WorkSpace\.claude-mem` rather
+than on top of it. With no choice made it prefers **the drive that already has a
+`WorkSpace`** — that is where `install.ps1` put the project, and the two should not drift
+apart — then C, then the first writable drive. That route creates the `WorkSpace` folder
+itself; a path you supply with `-Target` is yours, and its parent must already exist.
 
 Before a real move the Windows script refuses, changing nothing, when: Claude Code is
 running; or **any process has a file open inside the source**. The second is not a check on

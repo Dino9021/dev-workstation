@@ -34,6 +34,7 @@
 
 param(
     [string] $Target,
+    [string] $Drive = '',
     [string] $Source = (Join-Path $env:USERPROFILE '.claude'),
     [switch] $KeepBackup,
     [switch] $WhatIf,
@@ -66,6 +67,96 @@ function Test-ClaudeCodeRunning {
     param([string] $EnvMarker, [int] $ProcessCount)
     if ($EnvMarker) { return $true }
     return ($ProcessCount -gt 0)
+}
+
+function Get-WritableDrive {
+    <#
+      Which drive letters can this account actually create a folder on?
+
+      ⛔ IT CREATES ONE AND DELETES IT. Reading the ACL, or trusting DriveType, is a guess,
+      and the case that matters is the one a guess gets wrong: a standard user on a fixed
+      disk whose root they may not write. The probe answers for the account that is
+      running, which is the only account whose answer counts.
+
+      The same instrument as install.ps1's function of this name, and deliberately so: the
+      drive this offers must be a drive install.ps1 would also have accepted.
+    #>
+    $found = @()
+    foreach ($d in [IO.DriveInfo]::GetDrives()) {
+        if (-not $d.IsReady) { continue }
+        # Removable and network drives are not offered: data behind a stick that gets
+        # unplugged, or a share that is not mounted at logon, is the failure this script's
+        # own README warns about - a link pointing at nothing, and Claude Code creating a
+        # new empty folder that looks exactly like losing everything.
+        if ($d.DriveType -ne 'Fixed') { continue }
+        $root = $d.Name
+        $probe = Join-Path $root ('jx-write-probe-' + [Guid]::NewGuid().ToString('N'))
+        $ok = $false
+        try {
+            New-Item -ItemType Directory -Path $probe -ErrorAction Stop | Out-Null
+            $ok = $true
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        }
+        catch { $ok = $false }
+        if (-not $ok) { continue }
+        $freeGb = 0
+        try { $freeGb = [math]::Round($d.AvailableFreeSpace / 1GB, 1) } catch { $freeGb = 0 }
+        $found += [pscustomobject] @{
+            Letter       = $root.Substring(0, 1).ToUpperInvariant()
+            FreeGB       = $freeGb
+            Label        = [string] $d.VolumeLabel
+            HasWorkSpace = (Test-Path -LiteralPath (Join-Path $root 'WorkSpace'))
+        }
+    }
+    return @($found)
+}
+
+function Resolve-JunctionTarget {
+    <#
+      Where should the folder go, when the user did not name a path?
+
+      ⭐ THE ANSWER IS THE WorkSpace ROOT, the same place install.ps1 puts everything
+      (owner, 2026-10-20: 「~/.claude 的 Junction 路徑在腳本中要讓使用者自己選，否則應該與
+      install 一樣設到 WorkSpace 路徑去」). So `~/.claude` becomes `<drive>:\WorkSpace\.claude`
+      and `~/.claude-mem` becomes `<drive>:\WorkSpace\.claude-mem` - the leaf name is kept,
+      so moving a second folder cannot collide with the first.
+
+      PURE - it takes the candidates rather than probing - so -SelfTest drives every branch
+      on a machine with any drive layout at all. Returns Target, or Reason when the letter
+      cannot be used.
+
+      An empty $Letter means "nobody chose". The default then prefers a drive that ALREADY
+      has a WorkSpace, because that is where install.ps1 put the project and the two should
+      not drift apart; failing that C, and failing that the first writable drive. A machine
+      where the user cannot write C is exactly the standard-user case this project spent a
+      week on, so refusing there would be refusing for the wrong reason.
+    #>
+    param([string] $Letter, $Candidates, [string] $LeafName)
+
+    $cands = @($Candidates)
+    $letters = @($cands | ForEach-Object { $_.Letter })
+    if ($letters.Count -eq 0) {
+        return @{ Target = $null; Reason = 'no drive on this machine accepts a new folder at its root' }
+    }
+    if (-not $LeafName) {
+        return @{ Target = $null; Reason = 'the source has no name to use at the destination' }
+    }
+
+    $want = ''
+    if ($Letter) { $want = $Letter.Trim().TrimEnd(':', '\').ToUpperInvariant() }
+    if ($want.Length -gt 1) {
+        return @{ Target = $null; Reason = "'$Letter' is not a single drive letter" }
+    }
+    if (-not $want) {
+        $withWs = @($cands | Where-Object { $_.HasWorkSpace } | ForEach-Object { $_.Letter })
+        if ($withWs.Count -gt 0) { $want = $withWs[0] }
+        elseif ($letters -contains 'C') { $want = 'C' }
+        else { $want = $letters[0] }
+    }
+    elseif ($letters -notcontains $want) {
+        return @{ Target = $null; Reason = "drive $want is not one this account can create a folder on ($($letters -join ', '))" }
+    }
+    return @{ Target = "$want`:\WorkSpace\$LeafName"; Reason = $null }
 }
 
 function Test-FolderMovable {
@@ -256,6 +347,40 @@ function Invoke-JunctionSelfTest {
     Check 'target: no path at all is refused' `
         ((Test-TargetAcceptable $s '' $false 0 $true) -like '*no target*')
 
+    # --- where it goes when the user names no path (owner, 2026-10-20): the WorkSpace
+    # root on the drive they pick, keeping the folder's own name.
+    $drives = @(
+        [pscustomobject] @{ Letter = 'C'; FreeGB = 50;  Label = '';     HasWorkSpace = $false }
+        [pscustomobject] @{ Letter = 'E'; FreeGB = 400; Label = 'Data'; HasWorkSpace = $true }
+    )
+    Check 'target: a chosen drive gives {letter}:\WorkSpace\{name}' `
+        ((Resolve-JunctionTarget 'E' $drives '.claude').Target -eq 'E:\WorkSpace\.claude')
+    Check 'target: the folder keeps its own name, so a second move cannot collide' `
+        ((Resolve-JunctionTarget 'E' $drives '.claude-mem').Target -eq 'E:\WorkSpace\.claude-mem')
+    # ⭐ Nobody chose: prefer the drive that ALREADY has a WorkSpace, because that is where
+    # install.ps1 put the project and the two should not drift apart.
+    Check 'target: no choice prefers the drive that already has WorkSpace' `
+        ((Resolve-JunctionTarget '' $drives '.claude').Target -eq 'E:\WorkSpace\.claude')
+    $noWs = @(
+        [pscustomobject] @{ Letter = 'C'; FreeGB = 50;  Label = ''; HasWorkSpace = $false }
+        [pscustomobject] @{ Letter = 'E'; FreeGB = 400; Label = ''; HasWorkSpace = $false }
+    )
+    Check 'target: with no WorkSpace anywhere, C is the default' `
+        ((Resolve-JunctionTarget '' $noWs '.claude').Target -eq 'C:\WorkSpace\.claude')
+    # The standard-user case this project spent a week on: C may be unwritable, and
+    # refusing there would be refusing for the wrong reason.
+    $noC = @([pscustomobject] @{ Letter = 'E'; FreeGB = 400; Label = ''; HasWorkSpace = $false })
+    Check 'target: no writable C falls back to the first writable drive' `
+        ((Resolve-JunctionTarget '' $noC '.claude').Target -eq 'E:\WorkSpace\.claude')
+    Check 'target: a letter written "e:\" is still drive E' `
+        ((Resolve-JunctionTarget 'e:\' $drives '.claude').Target -eq 'E:\WorkSpace\.claude')
+    Check 'target: a drive this account cannot write is refused by NAME' `
+        ((Resolve-JunctionTarget 'D' $drives '.claude').Reason -like '*not one this account*')
+    Check 'target: a word instead of a letter is refused' `
+        ((Resolve-JunctionTarget 'data' $drives '.claude').Reason -like '*not a single drive letter*')
+    Check 'target: no writable drive at all is refused, not guessed' `
+        ((Resolve-JunctionTarget '' @() '.claude').Reason -like '*no drive*')
+
     $a = @{ 'a.txt' = 10; 'sub\b.txt' = 20 }
     Check 'manifest: identical trees compare equal' `
         ((Compare-TreeManifest $a @{ 'a.txt' = 10; 'sub\b.txt' = 20 }).Count -eq 0)
@@ -380,11 +505,59 @@ if ($running) {
 }
 
 # --- 3. the target
+# ⭐ NO -Target MEANS "PUT IT WHERE install.ps1 PUTS THINGS" (owner, 2026-10-20). The user
+# picks the DRIVE, exactly as install.ps1 asks it, and the path under it is not theirs to
+# invent: `<drive>:\WorkSpace\<same name it had>`. -Target still overrides everything, for
+# anyone who wants a path of their own.
 if (-not $Target) {
-    Say 'Where should it go? Give a full path on the drive you want, for example:'
-    Note 'D:\AgentData\.claude'
+    $cands = @(Get-WritableDrive)
+    $guess = Resolve-JunctionTarget '' $cands (Split-Path -Leaf $srcItem.FullName)
+    if (-not $guess.Target) { Bad "cannot choose a destination: $($guess.Reason)"; exit 1 }
+    $default = $guess.Target.Substring(0, 1)
+
+    if ($Drive) {
+        $picked = $Drive
+    }
+    else {
+        Say ''
+        Note 'Which drive should it move to?'
+        foreach ($c in $cands) {
+            $mark = $(if ($c.Letter -eq $default) { '*' } else { ' ' })
+            $label = $(if ($c.Label) { "  $($c.Label)" } else { '' })
+            $ws = $(if ($c.HasWorkSpace) { '  (has WorkSpace)' } else { '' })
+            Write-Host ("    {0} [{1}]  {2,8} GB free{3}{4}" -f $mark, $c.Letter, $c.FreeGB, $label, $ws)
+        }
+        Note '(only drives this account can actually create a folder on are listed)'
+        if ([Console]::IsInputRedirected) {
+            Warn "stdin is not a terminal, so there is nobody to ask: using $default."
+            Note 'Pass -Drive <letter>, or -Target <path>, to choose in an unattended run.'
+            $picked = $default
+        }
+        else {
+            $typed = Read-Host "   drive letter (empty = $default)"
+            $picked = $(if ($typed.Trim()) { $typed.Trim() } else { $default })
+        }
+    }
+
+    $chosen = Resolve-JunctionTarget $picked $cands (Split-Path -Leaf $srcItem.FullName)
+    if (-not $chosen.Target) { Bad "cannot use that drive: $($chosen.Reason)"; exit 1 }
+    $Target = $chosen.Target
     Say ''
-    $Target = (Read-Host 'Target path').Trim('"').Trim()
+    Note "destination: $Target"
+
+    # ⭐ THE SCRIPT CHOSE THIS PATH, SO THE SCRIPT CREATES ITS PARENT. install.ps1 creates
+    # the WorkSpace root rather than demanding it exist, and refusing to proceed because
+    # OUR OWN default's parent is missing would be the script blaming the user for its own
+    # choice. ⚠ A user-supplied -Target is NOT treated this way: that path is theirs, and
+    # the refusal below stays, which is M1's finding J6.
+    $wsRoot = Split-Path -Parent $Target
+    if (-not (Test-Path -LiteralPath $wsRoot)) {
+        try {
+            New-Item -ItemType Directory -Path $wsRoot -Force -ErrorAction Stop | Out-Null
+            Note "created $wsRoot"
+        }
+        catch { Bad "could not create $wsRoot : $($_.Exception.Message)"; exit 1 }
+    }
 }
 # Canonical form once, here, so the plan, the checks, the junction and the manifests all
 # talk about the same string. GetFullPath also turns forward slashes into backslashes.
