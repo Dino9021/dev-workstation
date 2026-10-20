@@ -866,13 +866,67 @@ function Select-SkippableRow {
     return @($Missing | Where-Object { $_.NeedsAdmin -and $_.Optional })
 }
 
+function Add-MissingPathEntry {
+    <#
+      Return $PathValue with $Directory prepended, unless it is already an entry.
+
+      PURE, so -SelfTest drives it with made-up strings. Entry-by-entry, never a
+      substring match, for the same reason Test-PathEntryPresent exists: a substring
+      test calls C:\tools\bin present when only C:\tools\bin2 is there.
+    #>
+    param([string] $PathValue, [string] $Directory)
+    if (-not $Directory) { return $PathValue }
+    if (Test-PathEntryPresent $PathValue $Directory) { return $PathValue }
+    if (-not $PathValue) { return $Directory }
+    return "$Directory;$PathValue"
+}
+
 function Update-PathFromRegistry {
     # An installer edits the machine/user PATH, but THIS process inherited the old
     # one. Rebuilding it in-process is what removes the "now re-open your terminal"
     # round trip between installing a tool and using it.
-    $machine = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
-    $user = [Environment]::GetEnvironmentVariable('PATH', 'User')
-    $env:PATH = "$machine;$user"
+    #
+    # ⛔ AND IT PUTS PowerShell 7 BACK, because the rebuild is what loses it.
+    # Measured 2026-10-20 on a clean VM: a first install reached "Preflight B" and died
+    # with `--with-graph-servers needs pwsh on PATH, and it is not there`, having
+    # installed pwsh minutes earlier. Reproduced the mechanism exactly - with the
+    # PowerShell\7 entry stripped, deploy.py's own probe (shutil.which, then run it)
+    # returns None at the FIRST step, which is the message it printed; and with the entry
+    # present it returns 0 and `7.6.7`. ⚠ PowerShell does NOT make its own $PSHOME
+    # findable: measured on PENRIL, with the entry stripped from $env:PATH inside a pwsh
+    # process, `Get-Command pwsh` is NOT FOUND and `& pwsh` fails too. So nothing restores
+    # this for us.
+    #
+    # Get-Pwsh7Path finds PowerShell 7 whether or not it is on PATH, which is exactly the
+    # knowledge this rebuild is missing. The comment above Test-DependencyPresent already
+    # recorded that this rebuild discards $PSHOME and called the consequence reachable;
+    # this is that consequence being fixed rather than described.
+    $exe = Get-Pwsh7Path
+    $dir = ''
+    if ($exe) { $dir = Split-Path -Parent $exe }
+    $env:PATH = Build-ProcessPath `
+        ([Environment]::GetEnvironmentVariable('PATH', 'Machine')) `
+        ([Environment]::GetEnvironmentVariable('PATH', 'User')) `
+        $dir
+}
+
+function Build-ProcessPath {
+    <#
+      The rebuilt PATH, given what the registry holds and where PowerShell 7 actually is.
+
+      PURE - it takes the registry values rather than reading them - and that is the only
+      reason the case this exists for can be tested at all. ⛔ THE BUG ONLY APPEARS WHEN
+      THE REGISTRY DOES NOT YET LIST PowerShell\7, which is true on a clean machine during
+      the very first install and false on every development machine. Measured 2026-10-20:
+      a mutation that deleted the re-add from the impure version passed the whole self-test
+      on this host, because this host's machine PATH already carries the entry, so the
+      rebuild restored it for an unrelated reason. A test that cannot fail is not a test;
+      passing the registry in is what makes the clean-machine condition reachable.
+    #>
+    param([string] $MachinePath, [string] $UserPath, [string] $Pwsh7Dir)
+    $rebuilt = "$MachinePath;$UserPath"
+    if ($Pwsh7Dir) { $rebuilt = Add-MissingPathEntry $rebuilt $Pwsh7Dir }
+    return $rebuilt
 }
 
 function Write-Phase {
@@ -1975,6 +2029,63 @@ function Invoke-SelfTest {
     Check 'path entry: a shorter prefix does NOT count'              (-not (Test-PathEntryPresent $pv 'C:\Users'))
     Check 'path entry: absent is absent'                             (-not (Test-PathEntryPresent $pv 'C:\nowhere'))
     Check 'path entry: an empty PATH holds nothing'                  (-not (Test-PathEntryPresent '' 'C:\one'))
+
+    # ⛔ THE REBUILD MUST PUT PowerShell 7 BACK. Measured on a clean VM 2026-10-20: a first
+    # install died at Preflight B with "needs pwsh on PATH, and it is not there" having
+    # installed pwsh minutes before, because rebuilding PATH from the registry drops the
+    # entry and nothing puts it back - PowerShell does not make its own $PSHOME findable.
+    $p7 = 'C:\Program Files\PowerShell\7'
+    Check 'rebuild: a PATH without PowerShell 7 gains it' `
+        ((Add-MissingPathEntry 'C:\one;C:\two' $p7) -eq "$p7;C:\one;C:\two")
+    Check 'rebuild: a PATH that already has it is left ALONE' `
+        ((Add-MissingPathEntry "C:\one;$p7;C:\two" $p7) -eq "C:\one;$p7;C:\two")
+    Check 'rebuild: a trailing backslash is still the same entry' `
+        ((Add-MissingPathEntry "C:\one;$p7\;C:\two" $p7) -eq "C:\one;$p7\;C:\two")
+    Check 'rebuild: case differences are still the same entry' `
+        ((Add-MissingPathEntry 'C:\one;c:\program files\powershell\7' $p7) -eq 'C:\one;c:\program files\powershell\7')
+    # The lookalike: a LONGER sibling must not count as the entry being present.
+    Check 'rebuild: PowerShell\70 does NOT count as PowerShell\7' `
+        ((Add-MissingPathEntry 'C:\one;C:\Program Files\PowerShell\70' $p7) -eq "$p7;C:\one;C:\Program Files\PowerShell\70")
+    Check 'rebuild: an empty PATH becomes just the directory' `
+        ((Add-MissingPathEntry '' $p7) -eq $p7)
+    # Fail safe: with nothing to add, hand back exactly what came in rather than a
+    # PATH with a stray leading semicolon - an empty entry means "current directory".
+    Check 'rebuild: no directory to add leaves PATH untouched' `
+        ((Add-MissingPathEntry 'C:\one;C:\two' '') -eq 'C:\one;C:\two')
+
+    # ⛔ THE CLEAN-MACHINE CASE, WHICH IS THE WHOLE POINT. The registry here is a string
+    # this test supplies, NOT this host's: on a machine that already has PowerShell 7 the
+    # registry carries the entry and the rebuild restores it for an unrelated reason.
+    # Measured 2026-10-20 - a mutation deleting the re-add passed the entire self-test on
+    # PENRIL for exactly that reason, which is why the registry is now an argument.
+    $machineNoPwsh = 'C:\Windows;C:\Windows\system32'
+    Check 'rebuild: a registry WITHOUT PowerShell 7 still yields it on PATH' `
+        ((Build-ProcessPath $machineNoPwsh 'C:\Users\u\bin' $p7) -like "$p7;*")
+    Check 'rebuild: and the registry entries all survive' `
+        (((Build-ProcessPath $machineNoPwsh 'C:\Users\u\bin' $p7) -split ';') -contains 'C:\Windows\system32')
+    Check 'rebuild: a registry that already lists it gains no duplicate' `
+        (@((Build-ProcessPath "C:\Windows;$p7" 'C:\Users\u\bin' $p7) -split ';' |
+            Where-Object { $_ -eq $p7 }).Count -eq 1)
+    Check 'rebuild: no PowerShell 7 found means no entry is invented' `
+        ((Build-ProcessPath $machineNoPwsh 'C:\Users\u\bin' '') -eq "$machineNoPwsh;C:\Users\u\bin")
+
+    # And the live wiring, as a smoke test. ⚠ This one CANNOT fail on a host whose registry
+    # already lists PowerShell 7 - see above - so it is deliberately not the case the
+    # mutation is aimed at.
+    # Safe to run anywhere: PATH is restored in the finally, as the pwsh-gate case below
+    # already does.
+    if (Get-Pwsh7Path) {
+        $savedRebuild = $env:PATH
+        try {
+            $env:PATH = (($env:PATH -split ';') | Where-Object { $_ -and ($_ -notmatch 'PowerShell\\7') }) -join ';'
+            $strippedOk = -not [bool] (Get-Command pwsh -ErrorAction SilentlyContinue)
+            Update-PathFromRegistry
+            Check 'rebuild: control - stripping PowerShell 7 really does hide pwsh' $strippedOk
+            Check 'rebuild: Update-PathFromRegistry PUTS PowerShell 7 BACK' `
+                ([bool] (Get-Command pwsh -ErrorAction SilentlyContinue))
+        }
+        finally { $env:PATH = $savedRebuild }
+    }
     # Two rows need this, and both for the same reason: their vendor installer places
     # a binary in %USERPROFILE%\.local\bin and leaves the PATH to a human.
     $clDep = $DEPS | Where-Object { $_.Name -eq 'claude' }
@@ -3689,6 +3800,14 @@ if (-not (Test-Path (Join-Path $Repo '.git'))) {
 #    before the -CheckOnly path does.
 #    -PatchOnly is never added: in that script the -PatchOnly branch runs and exits
 #    BEFORE -CheckOnly is consulted, so the pair WRITES while claiming to check.
+# ⛔ REBUILD PATH FIRST. Phase 2 has just installed tools, and the preflights below are
+# the first thing to USE them - `pwsh` here, and `python` plus `pwsh` again inside
+# deploy.py. Until 2026-10-20 nothing refreshed PATH between the two, and on a clean VM
+# that is exactly where a first install died: everything installed, then Preflight B
+# reported pwsh "not there". Every other call site of this rebuild is before phase 2, so
+# none of them covers what phase 2 just added.
+Update-PathFromRegistry
+
 Write-Phase "Preflight A: prerequisite versions (graph-servers/install.ps1 -CheckOnly)"
 & pwsh -NoProfile -ExecutionPolicy Bypass -File $graph -CheckOnly 2>&1 |
     ForEach-Object { Write-Host $_ }        # piped so the transcript sees it
