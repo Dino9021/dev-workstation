@@ -94,7 +94,7 @@ curl -fsSLo /tmp/install.sh https://raw.githubusercontent.com/Dino9021/dev-works
 | [`claude-mem/`](claude-mem/) | **claude-mem**，跨 session 的記憶。預設就裝。腳本化安裝需要三條指令，其中一條幾乎所有人都會漏掉；也說明它跟專案自己的 `Memory/` 資料夾要怎麼區分 |
 | [`general-claude-md/`](general-claude-md/) | 三份給 AI 代理讀的指令檔：`user-CLAUDE.md` 放到 `~/.claude/CLAUDE.md`（整台機器每個專案都載入）、`VERIFICATION-LESSONS.md` 放到 `~/.claude/docs/`、`project-CLAUDE.md` 是每個專案自己的 `CLAUDE.md` 範本 |
 | [`parallel-agent-operations/`](parallel-agent-operations/) | 一段可貼進 `CLAUDE.md` 的規則，阻止 AI 代理自作主張一次派出幾十個子代理——它看不到自己會燒掉多少額度 |
-| [`Tools/`](Tools/) | [`deploy.py`](Tools/deploy.py) 負責放置上面那三份指令檔：有 manifest 記錄、會先備份、**不會覆蓋你自己改過的檔案**。[`test_deploy.py`](Tools/test_deploy.py) 是它的測試 |
+| [`Tools/`](Tools/) | [`deploy.py`](Tools/deploy.py) 負責放置上面那三份指令檔：有 manifest 記錄、會先備份、**不會覆蓋你自己改過的檔案**。[`test_deploy.py`](Tools/test_deploy.py) 是它的測試。[`ShowClaudeCodePricing.ps1`](Tools/ShowClaudeCodePricing.ps1) 印出 dispatch-guard 的模型計價表——派工給子代理之前想知道哪個模型多少錢就跑它，可以直接雙擊，看完按任意鍵關閉 |
 
 每個資料夾都有自己的逐步指南。某一步失敗、或想手動接手時，要讀的是那幾份。
 
@@ -536,7 +536,7 @@ from now, on another machine, it still installs."
 | [`claude-mem/`](claude-mem/) | **claude-mem**, cross-session memory, installed by default. The three commands a scripted install needs, one of which nearly everybody leaves out, and how to keep it from being confused with a project's own `Memory/` folder |
 | [`general-claude-md/`](general-claude-md/) | Three instruction files for an AI agent: `user-CLAUDE.md` goes to `~/.claude/CLAUDE.md` (loaded in every project on the machine), `VERIFICATION-LESSONS.md` to `~/.claude/docs/`, and `project-CLAUDE.md` is the template for each project's own `CLAUDE.md` |
 | [`parallel-agent-operations/`](parallel-agent-operations/) | A `CLAUDE.md` rule that stops an agent fanning out into dozens of subagents on its own — it cannot see the session budget it would burn |
-| [`Tools/`](Tools/) | [`deploy.py`](Tools/deploy.py) places those three instruction files: manifest-tracked, backed up first, and it **never overwrites a file you edited**. [`test_deploy.py`](Tools/test_deploy.py) is its test suite |
+| [`Tools/`](Tools/) | [`deploy.py`](Tools/deploy.py) places those three instruction files: manifest-tracked, backed up first, and it **never overwrites a file you edited**. [`test_deploy.py`](Tools/test_deploy.py) is its test suite. [`ShowClaudeCodePricing.ps1`](Tools/ShowClaudeCodePricing.ps1) prints dispatch-guard's model pricing table — run it when you want to know what a model costs before dispatching a sub-agent; double-click it, and it waits for a key before closing |
 
 Each folder carries its own step-by-step guide. Those are the ones to read when a step
 fails or you want to take over by hand.
