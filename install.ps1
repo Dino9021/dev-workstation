@@ -140,9 +140,10 @@ param(
     # -NoUpdate is for the cases where pulling is still wrong: a developer testing an
     # uncommitted change, a pinned deployment, and this repository's own working tree when
     # more than one session is editing it.
-    # Which drive the WorkSpace folder is created on, when this file was downloaded alone
-    # and has to clone the repository somewhere (owner, 2026-10-14). A bare letter: -Drive D.
-    # 'D:' and 'D:\' are accepted too, because that is what people type.
+    # Which drive the WorkSpace folder is on (owner, 2026-10-14) - asked on a run from inside
+    # a clone too, not only when this file was downloaded alone (owner, 2026-10-21:
+    # 「一樣問磁碟機」). A bare letter: -Drive D. 'D:' and 'D:\' are accepted too, because that
+    # is what people type. Both handovers pass the answer on, so a run asks it ONCE.
     #
     # Left out, an interactive run ASKS, listing only the drives this account can actually
     # create a folder on - and a run that cannot ask (redirected stdin, -CheckOnly, a
@@ -972,7 +973,12 @@ function Get-ClaudeMemState {
       matches is how a stopped worker gets reported as healthy.
     #>
     if (-not (Test-Path (Join-Path $env:USERPROFILE '.claude-mem'))) { return 'absent' }
-    $out = (& npx claude-mem status 2>&1 | Out-String)
+    # ⛔ --yes ON EVERY npx HERE. npx asks "Ok to proceed? (y)" before running a package that
+    # is not cached (npm's own npx docs), and only when stdin is a real terminal - so every
+    # earlier measurement, all non-interactive, missed it. With the output piped into
+    # Out-String the question is invisible and the run looks hung: a 2026-10-21 install log
+    # stops right after "== claude-mem". install.sh has always passed -y.
+    $out = (& npx --yes claude-mem status 2>&1 | Out-String)
     if ($out -match 'Worker is running') { return 'running' }
     if ($out -match 'Worker is not running') { return 'stopped' }
     # Anything else - an error, an unrecognised build, a half-written install - is
@@ -2089,6 +2095,22 @@ function Invoke-SelfTest {
         Check 'order: drive and Cowork are asked before the gate question' `
             (($qDrive -lt $qPortable) -and ($qCowork -lt $qPortable))
 
+        # (2026-10-21) Counted with .Contains(), not Find-SourceLine: its -like reads `[` as
+        # a wildcard class, and the drive needle has one. Needles glued, as above.
+        $codeLines = @($meSrc | Where-Object { -not $_.TrimStart().StartsWith('#') })
+        $countOf = { param($n) @($codeLines | Where-Object { $_.Contains($n) }).Count }
+        # ⛔ npx ASKS BEFORE RUNNING AN UNCACHED PACKAGE, and only on a real terminal - where
+        # the output is piped away, so the question is invisible and the run hangs.
+        Check 'npx: no claude-mem call without --yes' ((& $countOf ('& npx ' + 'claude-mem')) -eq 0)
+        Check 'npx: control - the --yes calls were found' ((& $countOf ('& npx --yes ' + 'claude-mem')) -ge 4)
+        # The drive is asked on every run (owner, 2026-10-21) and asked ONCE: both handovers
+        # forward it.
+        Check 'drive: both handovers forward the chosen drive' `
+            ((& $countOf ('$bound[' + "'Drive'] = ")) -eq 2)
+        $qProbe = Find-SourceLine $meSrc ('$driveCandidates = ' + 'Get-WritableDrive')
+        Check 'drive: the question is not fenced off from a clone run' (
+            ($qProbe -gt 0) -and (-not ($meSrc[$qProbe - 2].Contains('Test-IsClone'))))
+
         # ⛔ AND THE GO-AHEAD COMES BEFORE EVERY INSTALL (owner, 2026-10-20: 問完問題之後
         # 要給 Summary 確認才正式開始). The portable install used to be the FIRST thing the
         # run did, inside the gate - so the summary, wherever it was printed, described a
@@ -3153,30 +3175,30 @@ if ((-not $NoUpdate) -and (Test-IsClone $here)) {
 }
 
 # ------------------------------------------------------------- which drive (2026-10-14)
-# ⛔ ONLY WHEN A CLONE IS ACTUALLY GOING TO HAPPEN. $WORKSPACE_ROOT is used for exactly one
-# thing - where the bootstrap puts the repository - so a run started from inside a clone
-# has nothing to decide and is not asked. Asking anyway would be a question with no
-# consequence, which teaches people to press Enter without reading.
+# ⭐ ASKED ON EVERY RUN, a run from inside a clone included (owner, 2026-10-21: 「一樣問磁碟機」).
+# Until then a clone run was never asked and kept the default, so its Summary printed
+# "WorkSpace : C:\WorkSpace" for a repository on D: - measured in a 2026-10-21 install log,
+# where the copy the bootstrap handed over to showed C:\WorkSpace after the user chose D.
+# ⚠ ASKED ONCE PER RUN: the PowerShell 7 handover and the bootstrap handover both pass the
+# answer on as -Drive (see $bound['Drive'] there). Before that fix the child asked again.
 #
 # Before the plan block below, so the plan can print the real path rather than a guess.
-if (-not (Test-IsClone $here)) {
-    $driveCandidates = Get-WritableDrive
-    $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
-    if (-not $resolved.Root) {
-        Write-Host ""
-        Write-Host "Cannot choose where to put WorkSpace: $($resolved.Reason)" -ForegroundColor Red
-        Stop-Run 1
-    }
-    $defaultLetter = $resolved.Root.Substring(0, 1)
-    # Asked only when nobody has answered and there is more than one answer to give. One
-    # writable drive is not a choice, and -CheckOnly writes nothing so it may not create
-    # anything either - both take the default and say so.
-    if ((-not $Drive) -and (-not $CheckOnly) -and (@($driveCandidates).Count -gt 1)) {
-        $Drive = Read-DriveChoice -Candidates $driveCandidates -Default $defaultLetter
-        $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
-    }
-    $WORKSPACE_ROOT = $resolved.Root
+$driveCandidates = Get-WritableDrive
+$resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
+if (-not $resolved.Root) {
+    Write-Host ""
+    Write-Host "Cannot choose where to put WorkSpace: $($resolved.Reason)" -ForegroundColor Red
+    Stop-Run 1
 }
+$defaultLetter = $resolved.Root.Substring(0, 1)
+# Asked only when nobody has answered and there is more than one answer to give. One
+# writable drive is not a choice, and -CheckOnly writes nothing so it may not create
+# anything either - both take the default and say so.
+if ((-not $Drive) -and (-not $CheckOnly) -and (@($driveCandidates).Count -gt 1)) {
+    $Drive = Read-DriveChoice -Candidates $driveCandidates -Default $defaultLetter
+    $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
+}
+$WORKSPACE_ROOT = $resolved.Root
 
 # --------------------------------------------------- the plan, and the one question
 # ASKED HERE, BEFORE ANYTHING IS INSTALLED, and never again later in the run. A
@@ -3521,6 +3543,10 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     # installed, so nothing was asked, and the child's report says "a real run
     # would ASK". 'ask' therefore DOES cross the handover - on that path only.
     $bound['Cowork'] = $Cowork
+    # ⛔ THE DRIVE CROSSES TOO. An answer typed at the prompt lives in $Drive, never in
+    # $PSBoundParameters, so it was dropped here and the PowerShell 7 child asked again
+    # (2026-10-21 install log: the drive menu printed twice).
+    $bound['Drive'] = $WORKSPACE_ROOT.Substring(0, 1)
     $fwd = Get-ForwardArgs $bound
     Stop-RunLog
     & $pwshPath -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath @fwd
@@ -3639,6 +3665,9 @@ if (-not (Test-IsClone $here)) {
     foreach ($kv in $PSBoundParameters.GetEnumerator()) { $bound[$kv.Key] = $kv.Value }
     $bound['LogPath'] = $script:logFile
     $bound['Cowork'] = $Cowork
+    # The drive the clone was put on: without it the clone - which now asks too - asked a
+    # third time, or (before 2026-10-21) reported C:\WorkSpace for a clone on D:.
+    $bound['Drive'] = $WORKSPACE_ROOT.Substring(0, 1)
     $fwd = Get-ForwardArgs $bound
     $child = Join-Path $clone 'install.ps1'
     Write-Host "   handing over to $child"
@@ -4084,7 +4113,7 @@ elseif ($memState -eq 'stopped') {
     # Installed, just not up. Starting it is the whole fix - a reinstall here would
     # be a sledgehammer that also stops the worker it is about to start.
     Write-Host "   installed, but the worker is not running - starting it" -ForegroundColor Yellow
-    & npx claude-mem start 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "   $_" }
+    & npx --yes claude-mem start 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "   $_" }
 }
 else {
     # TELL THE PERSON BEFORE IT HAPPENS. This is the one step that hands control to
@@ -4116,14 +4145,14 @@ else {
     # question either. It matters more than it looks: the `server` runtime brings
     # up Docker with postgres and redis, which is emphatically not what this script
     # is offering to do to somebody's machine.
-    & npx claude-mem install --provider claude --runtime worker 2>&1 |
+    & npx --yes claude-mem install --provider claude --runtime worker 2>&1 |
         Select-Object -Last 6 | ForEach-Object { Write-Host "   $_" }
 
     # THE LINE EVERYONE FORGETS. In a non-interactive terminal - which is what this
     # script is - the installer prints "Worker autostart skipped" and returns
     # success. No worker means nothing is ever captured, and nothing errors to say
     # so. Starting an already-running worker is a no-op (measured: same PID).
-    & npx claude-mem start 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "   $_" }
+    & npx --yes claude-mem start 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "   $_" }
 }
 
 # The plugin halves are cheap, self-reporting and - unlike the installer above -
