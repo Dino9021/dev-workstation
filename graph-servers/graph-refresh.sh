@@ -88,9 +88,25 @@ ensure_daemon() {
     nohup "$python" -m code_review_graph daemon start </dev/null >/dev/null 2>&1 &
 }
 
-# proc_start PID -> the process's start time as `ps` prints it, spaces squeezed, or nothing
+# proc_start PID -> the process's start time as `ps` prints it IN THE C LOCALE, spaces
+# squeezed, or nothing.
+# ⛔ LC_ALL=C IS LOAD-BEARING. `ps -o lstart` follows the locale - measured 2026-10-22:
+# C "Thu Oct 22 10:40:33 2026", zh_TW "四 10月/22 10:40:33 2026". This hook starts from
+# SessionStart (Claude's locale) and from post-commit (the terminal's), so a holder and a
+# reader can differ - and a holder that wrote in zh_TW looked RECYCLED to a reader in C,
+# which stole its lock while it was alive.
 proc_start() {
-    ps -p "$1" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'
+    LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'
+}
+
+# whole_start TEXT -> 0 when TEXT is a complete C-locale start time, e.g.
+# "Thu Oct 22 10:40:33 2026" or "Thu Oct 2 10:40:33 2026" (spaces squeezed)
+whole_start() {
+    case $1 in
+        [A-Z][a-z][a-z]' '[A-Z][a-z][a-z]' '[0-9]' '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]' '[0-9][0-9][0-9][0-9]) return 0 ;;
+        [A-Z][a-z][a-z]' '[A-Z][a-z][a-z]' '[0-9][0-9]' '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]' '[0-9][0-9][0-9][0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # lock_line LOCK -> the first line of LOCK/pid: "<pid> <start time>", or nothing.
@@ -111,6 +127,9 @@ lock_holder_alive() {
     kill -0 "$_p" 2>/dev/null || return 1
     _want=$(printf '%s' "${_line#"$_p"}" | sed 's/^ *//')
     [ -n "$_want" ] || return 0                     # an older lock: no start time recorded
+    # not a whole timestamp (a write cut short, or another locale): unknown, so ALIVE.
+    # Only a WELL-FORMED start time that differs proves the pid was recycled (W1).
+    whole_start "$_want" || return 0
     _have=$(proc_start "$_p")
     [ -n "$_have" ] || return 0                     # unreadable: do not call it dead
     [ "$_have" = "$_want" ]

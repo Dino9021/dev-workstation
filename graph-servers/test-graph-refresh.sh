@@ -171,7 +171,7 @@ check 'lock: an OLD lock whose recorded holder is DEAD is taken over' "$([ "$(co
 # hold the lock for ever. Same rule as graph-refresh.ps1 (owner, 2026-10-22).
 sleep 30 & other=$!
 ostart=$(ps -p $other -o lstart= | tr -s ' ' | sed 's/^ //; s/ $//')
-mkdir -p "$lk"; printf '%s %s\n' $other 'Mon Jan  1 00:00:00 2001' >"$lk/pid"; touch -t 202001010000 "$lk"
+mkdir -p "$lk"; printf '%s %s\n' $other 'Mon Jan 1 00:00:00 2001' >"$lk/pid"; touch -t 202001010000 "$lk"
 run --which gitnexus --repo "$repo"
 check 'lock: a live pid with the WRONG start time (recycled) does not keep the lock' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
 # the control that makes the case above mean something: the SAME live pid with its RIGHT
@@ -179,6 +179,40 @@ check 'lock: a live pid with the WRONG start time (recycled) does not keep the l
 rm -rf "$lk"; mkdir -p "$lk"; printf '%s %s\n' $other "$ostart" >"$lk/pid"; touch -t 202001010000 "$lk"
 run --which gitnexus --repo "$repo"
 check 'lock: ...control: the same pid with its RIGHT start time keeps the lock' "$([ "$(count 'node')" = 0 ]; echo $?)"
+# ⛔ `ps -o lstart` IS LOCALE-DEPENDENT (measured 2026-10-22: C "Thu Oct 22 10:40:33 2026",
+# zh_TW "四 10月/22 10:40:33 2026"). The hook starts from SessionStart (Claude's locale) AND
+# from post-commit (the terminal's), so a holder that wrote its start time in one locale and
+# a reader in another must still agree it is alive.
+rm -rf "$lk"; : >"$calls"
+env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" TMPDIR="$work/tmp" STUB_CALLS="$calls" LC_ALL=zh_TW.UTF-8 \
+    CRG_PYTHON="$bin/fakepython" NODE_SLEEP=5 "$shell" "$refresh" --which gitnexus --repo "$repo" & apid=$!
+sleep 1
+# the start time a zh_TW holder writes must still be a WHOLE C-locale one - else recycled
+# pids would go undetected for every holder started from a zh_TW terminal (it would only
+# ever read as "unknown, alive")
+zline=$(head -n 1 "$lk/pid" 2>/dev/null); zstart=${zline#* }
+check 'lock: a holder started in zh_TW still records a C-locale start time' \
+    "$(printf '%s\n' "$(awk '/^whole_start\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$refresh")" 'whole_start "$1"' | "$shell" -s "$zstart"; echo $?)"
+touch -t 202001010000 "$lk"
+env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" TMPDIR="$work/tmp" STUB_CALLS="$calls" LC_ALL=C \
+    CRG_PYTHON="$bin/fakepython" "$shell" "$refresh" --which gitnexus --repo "$repo"
+check 'lock: a holder that wrote in zh_TW is still ALIVE to a reader in C' "$([ "$(count 'node')" = 1 ]; echo $?)"
+kill $apid 2>/dev/null; wait $apid 2>/dev/null; rm -rf "$lk"
+# a start time cut short (a write that failed half way) is not a whole timestamp: unknown,
+# so ALIVE - never "a different start time", which would steal from a live holder (W1)
+mkdir -p "$lk"; printf '%s %s\n' $other 'Thu Oct 2' >"$lk/pid"; touch -t 202001010000 "$lk"
+run --which gitnexus --repo "$repo"
+check 'lock: a start time cut short leaves a live holder alone' "$([ "$(count 'node')" = 0 ]; echo $?)"
+rm -rf "$lk"
+# every PREFIX of a real start time must be rejected as "not whole" - a truncated write
+# cuts the end, and W1 found on Windows that a truncated ISO time still parses as a date
+fn=$(awk '/^whole_start\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$refresh")
+real=$(LC_ALL=C ps -p $$ -o lstart= | tr -s ' ' | sed 's/^ //; s/ $//')
+bad=$(printf '%s\n' "$fn" 'r=$1; n=${#r}; i=1; while [ $i -lt $n ]; do p=$(printf %s "$r" | cut -c1-$i); whole_start "$p" && echo "$p"; i=$((i+1)); done' \
+      | "$shell" -s "$real")
+check 'whole_start: the real start time itself is whole (control)' "$(printf '%s\n' "$fn" 'whole_start "$1"' | "$shell" -s "$real"; echo $?)"
+check "whole_start: none of its ${#real} - 1 shorter prefixes passes as whole" "$([ -z "$bad" ]; echo $?)"
+check 'whole_start: a zh_TW start time is not whole' "$(printf '%s\n' "$fn" 'whole_start "$1"' | "$shell" -s '四 10月/22 10:40:33 2026'; [ $? = 1 ]; echo $?)"
 # a lock written by the previous version holds the pid alone: treated as ALIVE
 rm -rf "$lk"; mkdir -p "$lk"; echo $other >"$lk/pid"; touch -t 202001010000 "$lk"
 run --which gitnexus --repo "$repo"
