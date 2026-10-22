@@ -32,6 +32,7 @@ cat >"$bin/node" <<'EOF'
 #!/bin/sh
 echo "node $*" >>"$STUB_CALLS"
 [ -n "$NODE_SLEEP" ] && sleep "$NODE_SLEEP"
+[ "${NODE_EXIT:-0}" != 0 ] && echo "ERROR: Database is locked by another process" >&2
 exit "${NODE_EXIT:-0}"
 EOF
 cat >"$bin/fakepython" <<'EOF'
@@ -113,6 +114,14 @@ check 'gitnexus: index that never catches up -> exactly 3 passes' "$([ "$(count 
 
 NODE_EXIT=7 run --which gitnexus --repo "$repo"
 check 'gitnexus: failing analyze is logged with its exit code' "$(logged 'analyze exit 7'; echo $?)"
+# a bare exit code cannot tell a locked database from a parse error (W1, 2026-10-21)
+check 'gitnexus: ...and WHY - the end of its output is in the log' "$(logged 'Database is locked by another process'; echo $?)"
+: >"$work/tmp/claude-graph-refresh.log"
+# NODE_EXIT=0 explicitly: in POSIX sh `NODE_EXIT=7 run ...` above LEAVES NODE_EXIT=7 set
+# after the function returns, so a bare `run` here would still be a failing analyze
+NODE_EXIT=0 run --which gitnexus --repo "$repo"
+check 'gitnexus: a SUCCESSFUL analyze logs nothing (its progress is not wanted)' "$([ ! -s "$work/tmp/claude-graph-refresh.log" ]; echo $?)"
+check 'gitnexus: no captured-output file is left behind' "$([ -z "$(ls "$work/tmp" | grep 'claude-graph-analyze')" ]; echo $?)"
 
 printf '{"nothing":"here"}\n' >"$repo/.gitnexus/meta.json"
 run --which gitnexus --repo "$repo"
@@ -134,6 +143,33 @@ touch -t 202001010000 "$work/tmp/claude-graph-gitnexus.lock"
 run --which gitnexus --repo "$repo"
 check 'lock: a stale stray FILE at the lock path does not block refreshes for ever' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
 rm -rf "$work/tmp/claude-graph-gitnexus.lock"
+
+# OLD IS NOT DEAD (W1: one analyze ran 11.5 h). Refresh A holds the lock with a slow
+# analyze; its lock is backdated past 30 minutes; refresh B must NOT start a second analyze.
+lk=$work/tmp/claude-graph-gitnexus.lock
+: >"$calls"
+env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" TMPDIR="$work/tmp" STUB_CALLS="$calls" \
+    CRG_PYTHON="$bin/fakepython" NODE_SLEEP=5 "$shell" "$refresh" --which gitnexus --repo "$repo" & apid=$!
+sleep 1
+check 'lock: the holder writes its pid into the lock' "$([ "$(cat "$lk/pid" 2>/dev/null)" -gt 0 ] 2>/dev/null; echo $?)"
+touch -t 202001010000 "$lk"
+: >"$work/tmp/claude-graph-refresh.log"
+env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" TMPDIR="$work/tmp" STUB_CALLS="$calls" \
+    CRG_PYTHON="$bin/fakepython" "$shell" "$refresh" --which gitnexus --repo "$repo"
+check 'lock: an OLD lock whose holder is ALIVE is not taken - no second analyze' "$([ "$(count 'node')" = 1 ]; echo $?)"
+check 'lock: ...and the live holder is logged by pid' "$(logged 'is ALIVE'; echo $?)"
+check 'lock: ...and the holder'"'"'s lock is still there' "$([ -d "$lk" ]; echo $?)"
+kill $apid 2>/dev/null; wait $apid 2>/dev/null; rm -rf "$lk"
+# a DEAD holder's old lock must still be taken over - the reason the rule exists
+mkdir "$lk"; echo 999999 >"$lk/pid"; touch -t 202001010000 "$lk"
+run --which gitnexus --repo "$repo"
+check 'lock: an OLD lock whose recorded holder is DEAD is taken over' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
+# a recycled pid: alive, but not a refresh - must not hold the lock for ever
+sleep 30 & other=$!
+mkdir -p "$lk"; echo $other >"$lk/pid"; touch -t 202001010000 "$lk"
+run --which gitnexus --repo "$repo"
+check 'lock: a pid recycled by an unrelated process does not keep the lock' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
+kill $other 2>/dev/null; wait $other 2>/dev/null; rm -rf "$lk"
 
 # 7. --detach returns at once while the refresh runs on
 start=$(date +%s)

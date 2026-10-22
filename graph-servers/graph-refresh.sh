@@ -88,6 +88,25 @@ ensure_daemon() {
     nohup "$python" -m code_review_graph daemon start </dev/null >/dev/null 2>&1 &
 }
 
+# lock_holder_alive LOCK -> 0 when the pid recorded in LOCK/pid is a running refresh.
+# The command must still mention graph-refresh, so a dead holder whose pid was recycled by
+# an unrelated process does not keep the lock for ever.
+lock_holder_alive() {
+    _p=$({ tr -d ' \n\r' <"$1/pid"; } 2>/dev/null)
+    case $_p in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$_p" 2>/dev/null || return 1
+    case $(ps -p "$_p" -o command= 2>/dev/null) in *graph-refresh*) return 0 ;; esac
+    return 1
+}
+
+# release_lock - remove the lock only if it is still OURS: a run must never delete a lock
+# another refresh holds.
+release_lock() {
+    # { } so the 2>/dev/null also covers the < redirection itself, which fails first
+    [ "$({ tr -d ' \n\r' <"$lock/pid"; } 2>/dev/null)" = "$$" ] && rm -rf "$lock"
+    return 0
+}
+
 # run_once NAME COMMAND... - runs COMMAND unless another refresh of NAME holds the lock.
 run_once() {
     lock=$tmp_dir/claude-graph-$1.lock
@@ -95,14 +114,26 @@ run_once() {
     # -e, not -d: a stray FILE at the lock path would otherwise make every mkdir below
     # fail, and the refresh would never run again (found by a mutation run 2026-10-15).
     if [ -e "$lock" ]; then
-        # younger than 30 minutes: another refresh owns it; older: a crashed run.
+        # younger than 30 minutes: another refresh owns it.
         if [ -n "$(find "$lock" -maxdepth 0 -mmin -30 2>/dev/null)" ]; then return 0; fi
-        rm -rf "$lock"
+        # ⛔ OLD IS NOT THE SAME AS DEAD (W1, measured on Windows 2026-10-21: one analyze ran
+        # 11.5 hours). Stealing an old lock from a LIVE refresh started a second analyze
+        # beside it, every half hour, each queueing on GitNexus's own database lock - the
+        # staleness rule manufacturing the queue it was meant to clear. Measured here too
+        # (2026-10-22, probe.sh): refresh B ran three analyzes while A, holding the lock,
+        # was still in its first. So the holder's pid is asked, not the clock.
+        if lock_holder_alive "$lock"; then
+            _p=$(tr -d ' \n\r' <"$lock/pid")
+            log "lock $lock is older than 30 min but its holder pid $_p is ALIVE (started $(ps -p "$_p" -o lstart= 2>/dev/null)) - not taking it"
+            return 0
+        fi
+        rm -rf "$lock"                                 # a crashed run, or a stray file
     fi
     mkdir "$lock" 2>/dev/null || return 0          # lost the race, nothing to do
-    trap 'rm -rf "$lock"' EXIT INT TERM
+    echo $$ >"$lock/pid"
+    trap 'release_lock' EXIT INT TERM
     "$@"
-    rm -rf "$lock"
+    release_lock
     trap - EXIT INT TERM
 }
 
@@ -125,9 +156,18 @@ gitnexus_refresh() {
         if [ -z "$indexed" ]; then log "cannot read lastCommit from $meta - refresh skipped"; return 0; fi
         [ "$head" = "$indexed" ] && return 0
         # --skip-agents-md: a refresh indexes; it never writes into an instruction file.
-        (cd "$repo" && node "$runner" analyze --skip-agents-md >/dev/null 2>&1)
+        # The output is KEPT, and on failure its last 15 lines go into the log: a bare
+        # "analyze exit 1" cannot tell a locked database from a parse error (W1: thirty
+        # such lines in six hours, index 64 commits behind, nobody could say why). A good
+        # analyze prints minutes of progress nobody needs, so only a failure is logged.
+        out_file=$(mktemp "$tmp_dir/claude-graph-analyze.XXXXXX") || out_file=/dev/null
+        (cd "$repo" && node "$runner" analyze --skip-agents-md >"$out_file" 2>&1)
         rc=$?
-        [ $rc -eq 0 ] || log "analyze exit $rc"
+        if [ $rc -ne 0 ]; then
+            log "analyze exit $rc - last lines of its output:"
+            [ -s "$out_file" ] && tail -n 15 "$out_file" | sed 's/^/    | /' >>"$log_file"
+        fi
+        [ "$out_file" = /dev/null ] || rm -f "$out_file"
     done
 }
 
