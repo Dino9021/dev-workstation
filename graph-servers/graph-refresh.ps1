@@ -140,9 +140,30 @@ function Invoke-Once {
     param([string] $Name, [scriptblock] $Body)
 
     $lock = Join-Path $env:TEMP "claude-graph-$Name.lock"
+    $pidFile = Join-Path $lock 'pid'
     if (Test-Path $lock) {
         $age = (Get-Date) - (Get-Item $lock).CreationTime
         if ($age.TotalMinutes -lt 30) { return }   # another refresh owns it
+
+        # ⛔ OLD IS NOT THE SAME AS DEAD, AND ASSUMING IT WAS CAUSED A PILE-UP.
+        # The 30-minute window was sized for a 142s analyze. Measured 2026-10-21 on
+        # D:\WorkSpace\Apotheosis: one analyze had been running 11.5 HOURS, so every half
+        # hour a later refresh declared the lock stale, took it, and started ANOTHER
+        # analyze - which then sat waiting on GitNexus's own database lock behind the
+        # first. Several were alive at once and the index was 64 commits behind. The
+        # staleness rule was manufacturing the queue it was meant to clear.
+        # So: ask whether the holder is still running before taking its lock.
+        $holder = $null
+        if (Test-Path $pidFile) { $holder = (Get-Content -LiteralPath $pidFile -Raw).Trim() }
+        if ($holder) {
+            $alive = Get-Process -Id ([int] $holder) -ErrorAction SilentlyContinue
+            if ($alive) {
+                Write-Log ("lock $lock is $([int] $age.TotalMinutes)m old but pid $holder is STILL RUNNING " +
+                           "($($alive.ProcessName), started $($alive.StartTime.ToString('s'))) - refresh skipped, " +
+                           'not starting a second one. Kill that process if it is wedged.')
+                return
+            }
+        }
         Remove-Item $lock -Recurse -Force -ErrorAction SilentlyContinue   # crashed run
         # ⛔ THE REMOVAL CAN FAIL, AND -ErrorAction SilentlyContinue HIDES IT. Windows
         # refuses to delete a file another process holds open - POSIX unlink does not,
@@ -157,6 +178,8 @@ function Invoke-Once {
             return
         }
     }
+    # The pid goes INSIDE the lock directory, so taking the lock and recording who holds
+    # it are one act - a separate file could outlive the lock and name a stranger.
     try { New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null }
     catch {
         # Normally a lost race, which is fine and self-correcting. Logged anyway because
@@ -165,6 +188,7 @@ function Invoke-Once {
         Write-Log "could not take the lock $lock - refresh skipped ($($_.Exception.Message))"
         return
     }
+    Set-Content -LiteralPath $pidFile -Value $PID -Encoding ascii -ErrorAction SilentlyContinue
     try { & $Body }
     finally { Remove-Item $lock -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -214,9 +238,23 @@ if ($Which -in @('gitnexus', 'both')) {
                 # would rewrite the project's shared instruction file, silently, and
                 # restore a block the user had deleted. A refresh indexes; it never
                 # writes into an instruction file.
+                # ⛔ CAPTURED, NOT DISCARDED. This used to be `*> $null`, so a failing
+                # analyze logged "analyze exit 1" and threw away the only thing that could
+                # say why. Measured 2026-10-21 on D:\WorkSpace\Apotheosis: ~30 such lines
+                # over six hours, the index 64 commits behind, and nobody able to tell a
+                # locked database from a parse error from a missing dependency. The log's
+                # own rule at the top of this file is that every give-up path leaves a line
+                # here; a line with no reason keeps the letter of it and none of the point.
+                # Only the tail, and only on failure: a successful analyze prints ~142s of
+                # progress that nobody needs.
                 Push-Location $Repo
-                try { & node $runner analyze --skip-agents-md *> $null } finally { Pop-Location }
-                if ($LASTEXITCODE -ne 0) { Write-Log "analyze exit $LASTEXITCODE" }
+                try { $out = & node $runner analyze --skip-agents-md 2>&1 } finally { Pop-Location }
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Log "analyze exit $LASTEXITCODE"
+                    foreach ($line in @($out | Select-Object -Last 15)) {
+                        Write-Log "  analyze: $line"
+                    }
+                }
             }
         }
     }

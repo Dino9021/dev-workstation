@@ -35,6 +35,13 @@ justification; if two instructions conflict, resolve the conflict in the text.
     already uses.
 14. Never tell the owner to go and find something mentioned earlier, in conversation or
     in a document. Restate it where you refer to it: name every item, or the path and line.
+15. A question must be answerable without scrolling back. A label is not a question: never
+    "Q3" or "option A" alone, and a bare topic is no better — "Q3 關於權限的問題要選 A 開放
+    還是 B 不開放" still cannot be answered, because it says neither WHICH permission nor
+    what either answer would do. Every time it is asked, including every repeat, give the
+    thing being decided and each option with its consequence. Enough to be understood, not
+    an essay. Keep the labels beside the text, never instead of it, so a one-word reply
+    still works.
 
 ## Pending items — one file, every session
 
