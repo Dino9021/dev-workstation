@@ -151,7 +151,10 @@ lk=$work/tmp/claude-graph-gitnexus.lock
 env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" TMPDIR="$work/tmp" STUB_CALLS="$calls" \
     CRG_PYTHON="$bin/fakepython" NODE_SLEEP=5 "$shell" "$refresh" --which gitnexus --repo "$repo" & apid=$!
 sleep 1
-check 'lock: the holder writes its pid into the lock' "$([ "$(cat "$lk/pid" 2>/dev/null)" -gt 0 ] 2>/dev/null; echo $?)"
+lline=$(head -n 1 "$lk/pid" 2>/dev/null); lpid=${lline%% *}
+check 'lock: the holder writes its pid into the lock' "$([ "$lpid" -gt 0 ] 2>/dev/null; echo $?)"
+check 'lock: ...and its START TIME beside it, as ps reports it' \
+    "$([ "${lline#"$lpid" }" = "$(ps -p "$lpid" -o lstart= | tr -s ' ' | sed 's/^ //; s/ $//')" ]; echo $?)"
 touch -t 202001010000 "$lk"
 : >"$work/tmp/claude-graph-refresh.log"
 env -i PATH="$bin:/usr/bin:/bin" HOME="$work/home" TMPDIR="$work/tmp" STUB_CALLS="$calls" \
@@ -164,11 +167,22 @@ kill $apid 2>/dev/null; wait $apid 2>/dev/null; rm -rf "$lk"
 mkdir "$lk"; echo 999999 >"$lk/pid"; touch -t 202001010000 "$lk"
 run --which gitnexus --repo "$repo"
 check 'lock: an OLD lock whose recorded holder is DEAD is taken over' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
-# a recycled pid: alive, but not a refresh - must not hold the lock for ever
+# a recycled pid: alive, but started at another time than the one recorded - it must not
+# hold the lock for ever. Same rule as graph-refresh.ps1 (owner, 2026-10-22).
 sleep 30 & other=$!
-mkdir -p "$lk"; echo $other >"$lk/pid"; touch -t 202001010000 "$lk"
+ostart=$(ps -p $other -o lstart= | tr -s ' ' | sed 's/^ //; s/ $//')
+mkdir -p "$lk"; printf '%s %s\n' $other 'Mon Jan  1 00:00:00 2001' >"$lk/pid"; touch -t 202001010000 "$lk"
 run --which gitnexus --repo "$repo"
-check 'lock: a pid recycled by an unrelated process does not keep the lock' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
+check 'lock: a live pid with the WRONG start time (recycled) does not keep the lock' "$([ "$(count 'node')" -ge 1 ]; echo $?)"
+# the control that makes the case above mean something: the SAME live pid with its RIGHT
+# start time must keep the lock - else the check could be dead and the case still pass
+rm -rf "$lk"; mkdir -p "$lk"; printf '%s %s\n' $other "$ostart" >"$lk/pid"; touch -t 202001010000 "$lk"
+run --which gitnexus --repo "$repo"
+check 'lock: ...control: the same pid with its RIGHT start time keeps the lock' "$([ "$(count 'node')" = 0 ]; echo $?)"
+# a lock written by the previous version holds the pid alone: treated as ALIVE
+rm -rf "$lk"; mkdir -p "$lk"; echo $other >"$lk/pid"; touch -t 202001010000 "$lk"
+run --which gitnexus --repo "$repo"
+check 'lock: an older lock with no start time and a live pid is left alone' "$([ "$(count 'node')" = 0 ]; echo $?)"
 kill $other 2>/dev/null; wait $other 2>/dev/null; rm -rf "$lk"
 
 # 7. --detach returns at once while the refresh runs on

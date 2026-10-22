@@ -88,22 +88,39 @@ ensure_daemon() {
     nohup "$python" -m code_review_graph daemon start </dev/null >/dev/null 2>&1 &
 }
 
-# lock_holder_alive LOCK -> 0 when the pid recorded in LOCK/pid is a running refresh.
-# The command must still mention graph-refresh, so a dead holder whose pid was recycled by
-# an unrelated process does not keep the lock for ever.
+# proc_start PID -> the process's start time as `ps` prints it, spaces squeezed, or nothing
+proc_start() {
+    ps -p "$1" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'
+}
+
+# lock_line LOCK -> the first line of LOCK/pid: "<pid> <start time>", or nothing.
+# { } so the 2>/dev/null also covers the < redirection itself, which fails first.
+lock_line() { { head -n 1 "$1/pid"; } 2>/dev/null; }
+
+# lock_holder_alive LOCK -> 0 when the process recorded in LOCK/pid is still the one that
+# took the lock. Alive is not enough: pids are reused, and a dead holder whose pid was taken
+# by another process would keep the lock for ever. The START TIME recorded beside the pid
+# decides - a recycled pid cannot have it. Same rule as Test-LockHolderAlive in
+# graph-refresh.ps1 (owner, 2026-10-22: both platforms the same), including the safe
+# direction: a lock with no start time (written by an older version) or a start time that
+# cannot be read now counts as ALIVE - calling a live refresh dead is what piled them up.
 lock_holder_alive() {
-    _p=$({ tr -d ' \n\r' <"$1/pid"; } 2>/dev/null)
+    _line=$(lock_line "$1")
+    _p=${_line%% *}
     case $_p in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$_p" 2>/dev/null || return 1
-    case $(ps -p "$_p" -o command= 2>/dev/null) in *graph-refresh*) return 0 ;; esac
-    return 1
+    _want=$(printf '%s' "${_line#"$_p"}" | sed 's/^ *//')
+    [ -n "$_want" ] || return 0                     # an older lock: no start time recorded
+    _have=$(proc_start "$_p")
+    [ -n "$_have" ] || return 0                     # unreadable: do not call it dead
+    [ "$_have" = "$_want" ]
 }
 
 # release_lock - remove the lock only if it is still OURS: a run must never delete a lock
 # another refresh holds.
 release_lock() {
-    # { } so the 2>/dev/null also covers the < redirection itself, which fails first
-    [ "$({ tr -d ' \n\r' <"$lock/pid"; } 2>/dev/null)" = "$$" ] && rm -rf "$lock"
+    _line=$(lock_line "$lock")
+    [ "${_line%% *}" = "$$" ] && rm -rf "$lock"
     return 0
 }
 
@@ -123,14 +140,17 @@ run_once() {
         # (2026-10-22, probe.sh): refresh B ran three analyzes while A, holding the lock,
         # was still in its first. So the holder's pid is asked, not the clock.
         if lock_holder_alive "$lock"; then
-            _p=$(tr -d ' \n\r' <"$lock/pid")
-            log "lock $lock is older than 30 min but its holder pid $_p is ALIVE (started $(ps -p "$_p" -o lstart= 2>/dev/null)) - not taking it"
+            _line=$(lock_line "$lock"); _p=${_line%% *}
+            log "lock $lock is older than 30 min but its holder pid $_p is ALIVE (started $(proc_start "$_p")) - not taking it. Kill that process if it is wedged."
             return 0
         fi
         rm -rf "$lock"                                 # a crashed run, or a stray file
     fi
     mkdir "$lock" 2>/dev/null || return 0          # lost the race, nothing to do
-    echo $$ >"$lock/pid"
+    # pid AND start time on ONE line: the pair is what makes a recycled pid detectable. One
+    # short printf, so a reader sees the whole line; if `ps` cannot say our start time the
+    # line holds the pid alone, which every reader treats as alive.
+    printf '%s %s\n' "$$" "$(proc_start $$)" >"$lock/pid"
     trap 'release_lock' EXIT INT TERM
     "$@"
     release_lock
