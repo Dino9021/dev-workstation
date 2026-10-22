@@ -160,7 +160,23 @@ function Test-LockHolderAlive {
     # A lock written by an older version has no start time; fall back to "alive" rather
     # than treating it as stale, which would steal the lock from a live refresh.
     if ($parts.Count -lt 2) { return $p }
-    try { if ($p.StartTime.ToString('o') -ne $parts[1]) { return $null } }
+    # ⛔ AN UNPARSEABLE START TIME IS "UNKNOWN", NOT "DEAD". Comparing the raw strings sent
+    # a half-written or garbled line down the recycled-pid path: measured 2026-10-22,
+    # "<pid> 2026-10-2" and "<pid> rubbish" both read as DEAD, so the lock would be stolen
+    # from a LIVE holder - the one failure this whole check exists to prevent. M1 caught
+    # the claim in the comment that used to sit here (graph-refresh.sh, 2026-10-22); the
+    # comment was wrong about the format AND the code did not do the safe thing.
+    # Genuine recycling still shows as a WELL-FORMED time that differs, so nothing is lost.
+    # ⛔ TryParseExact WITH THE ROUND-TRIP FORMAT, NOT TryParse. A TRUNCATED timestamp is
+    # still a valid DATE: measured, "2026-10-2" parses happily as 2 October 2026, so a
+    # loose parse would accept a half-written line, find it different, and steal the lock
+    # from a live holder - the very case this is guarding. Only a string we could have
+    # written ourselves counts, and we always write 'o'.
+    $recorded = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($parts[1], 'o', [cultureinfo]::InvariantCulture,
+                                       [Globalization.DateTimeStyles]::RoundtripKind,
+                                       [ref] $recorded)) { return $p }
+    try { if ($p.StartTime.ToString('o') -ne $recorded.ToString('o')) { return $null } }
     catch { return $p }       # start time unreadable: do not call a live process dead
     return $p
 }
@@ -233,8 +249,10 @@ function Invoke-Once {
         return
     }
     # pid AND start time, space separated: the pair is what makes a recycled pid
-    # detectable. Written as one line so a half-written file parses as "no start time"
-    # rather than as a wrong one.
+    # detectable. ⚠ A half-written line does NOT read as "no start time" - it reads as a
+    # DIFFERENT one, which is why Test-LockHolderAlive treats an unparseable time as
+    # unknown rather than comparing the raw strings. The claim that used to stand here was
+    # wrong, and M1 caught it by refusing to copy it into graph-refresh.sh.
     $stamp = ''
     try { $stamp = ' ' + (Get-Process -Id $PID).StartTime.ToString('o') } catch { $stamp = '' }
     Set-Content -LiteralPath $pidFile -Value ("$PID" + $stamp) -Encoding ascii -ErrorAction SilentlyContinue
