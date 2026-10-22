@@ -136,6 +136,54 @@ function Ensure-Daemon {
         -ArgumentList @('-m', 'code_review_graph', 'daemon', 'start')
 }
 
+function Test-LockHolderAlive {
+    <#
+      The process recorded in <lock>\pid, when it is a RUNNING graph-refresh. Otherwise
+      $null.
+
+      ⛔ ALIVE IS NOT ENOUGH - THE PID MUST STILL BE OURS. Windows reuses pids, so a holder
+      that died and had its pid taken by an unrelated process would look alive for ever and
+      the lock would never be reclaimed: a refresh that silently stops, which is the exact
+      failure this file keeps being bitten by. M1 made the same point on the macOS side
+      (`lock_holder_alive`, graph-refresh.sh) by requiring the command to still mention
+      graph-refresh; the start time is the Windows equivalent and is stricter - a recycled
+      pid cannot have the start time we recorded.
+    #>
+    param([string] $PidFile)
+    if (-not (Test-Path -LiteralPath $PidFile)) { return $null }
+    $raw = (Get-Content -LiteralPath $PidFile -Raw -ErrorAction SilentlyContinue)
+    if (-not $raw) { return $null }
+    $parts = $raw.Trim() -split '\s+'
+    if ($parts.Count -lt 1 -or $parts[0] -notmatch '^\d+$') { return $null }
+    $p = Get-Process -Id ([int] $parts[0]) -ErrorAction SilentlyContinue
+    if (-not $p) { return $null }
+    # A lock written by an older version has no start time; fall back to "alive" rather
+    # than treating it as stale, which would steal the lock from a live refresh.
+    if ($parts.Count -lt 2) { return $p }
+    try { if ($p.StartTime.ToString('o') -ne $parts[1]) { return $null } }
+    catch { return $p }       # start time unreadable: do not call a live process dead
+    return $p
+}
+
+function Remove-OwnLock {
+    <#
+      Remove the lock only when it is still OURS.
+
+      A run must never delete a lock another refresh holds. Without this, a run whose lock
+      had already been reclaimed would delete the NEW holder's lock on its way out, and two
+      refreshes would then run together - the thing the lock exists to prevent. The pid
+      check above makes that hard to reach; this makes it impossible. Same shape as M1's
+      `release_lock` in graph-refresh.sh.
+    #>
+    param([string] $Lock, [string] $PidFile)
+    $mine = $false
+    if (Test-Path -LiteralPath $PidFile) {
+        $raw = (Get-Content -LiteralPath $PidFile -Raw -ErrorAction SilentlyContinue)
+        if ($raw) { $mine = (($raw.Trim() -split '\s+')[0] -eq "$PID") }
+    }
+    if ($mine) { Remove-Item $Lock -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 function Invoke-Once {
     param([string] $Name, [scriptblock] $Body)
 
@@ -153,16 +201,12 @@ function Invoke-Once {
         # first. Several were alive at once and the index was 64 commits behind. The
         # staleness rule was manufacturing the queue it was meant to clear.
         # So: ask whether the holder is still running before taking its lock.
-        $holder = $null
-        if (Test-Path $pidFile) { $holder = (Get-Content -LiteralPath $pidFile -Raw).Trim() }
-        if ($holder) {
-            $alive = Get-Process -Id ([int] $holder) -ErrorAction SilentlyContinue
-            if ($alive) {
-                Write-Log ("lock $lock is $([int] $age.TotalMinutes)m old but pid $holder is STILL RUNNING " +
-                           "($($alive.ProcessName), started $($alive.StartTime.ToString('s'))) - refresh skipped, " +
-                           'not starting a second one. Kill that process if it is wedged.')
-                return
-            }
+        $alive = Test-LockHolderAlive $pidFile
+        if ($alive) {
+            Write-Log ("lock $lock is $([int] $age.TotalMinutes)m old but its holder pid $($alive.Id) is ALIVE " +
+                       "($($alive.ProcessName), started $($alive.StartTime.ToString('s'))) - not taking it. " +
+                       'Kill that process if it is wedged.')
+            return
         }
         Remove-Item $lock -Recurse -Force -ErrorAction SilentlyContinue   # crashed run
         # ⛔ THE REMOVAL CAN FAIL, AND -ErrorAction SilentlyContinue HIDES IT. Windows
@@ -188,9 +232,14 @@ function Invoke-Once {
         Write-Log "could not take the lock $lock - refresh skipped ($($_.Exception.Message))"
         return
     }
-    Set-Content -LiteralPath $pidFile -Value $PID -Encoding ascii -ErrorAction SilentlyContinue
+    # pid AND start time, space separated: the pair is what makes a recycled pid
+    # detectable. Written as one line so a half-written file parses as "no start time"
+    # rather than as a wrong one.
+    $stamp = ''
+    try { $stamp = ' ' + (Get-Process -Id $PID).StartTime.ToString('o') } catch { $stamp = '' }
+    Set-Content -LiteralPath $pidFile -Value ("$PID" + $stamp) -Encoding ascii -ErrorAction SilentlyContinue
     try { & $Body }
-    finally { Remove-Item $lock -Recurse -Force -ErrorAction SilentlyContinue }
+    finally { Remove-OwnLock $lock $pidFile }
 }
 
 # --- code-review-graph ------------------------------------------------------
