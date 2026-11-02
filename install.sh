@@ -821,6 +821,8 @@ main() {
         say '  a real run would then: apply the CLAUDE.md files, run graph-servers/install.sh,'
         say '  install claude-mem (and ask about its cloud half, Cowork), and these plugins:'
         plugins
+        phase 'Reply language (reply-language/install.sh --check-only)'
+        sh "$here/reply-language/install.sh" --check-only
         say ''
         say 'CHECK ONLY: nothing was installed or written.'
         exit 0
@@ -832,6 +834,11 @@ main() {
     phase 'Graph servers (graph-servers/install.sh)'
     if [ "$pdg" = 1 ]; then sh "$here/graph-servers/install.sh" --repo "$repo" --pdg; else sh "$here/graph-servers/install.sh" --repo "$repo"; fi
     graph_rc=$?
+
+    # the owner's standing rule: every reply in 正體中文 (owner, 2026-11-02)
+    phase 'Reply language: 正體中文 (reply-language/install.sh)'
+    sh "$here/reply-language/install.sh"
+    lang_rc=$?
 
     mem_failed=0
     claude_mem
@@ -847,6 +854,7 @@ main() {
     [ -n "$still" ] && say "FAILED     : $still"
     [ -z "$skipped$still" ] && say 'toolchain  : complete'
     [ $graph_rc = 0 ] && say 'graph      : every step ok' || say 'graph      : a step FAILED - see its summary above'
+    [ $lang_rc = 0 ] && say 'language   : 正體中文 rule in place' || say 'language   : FAILED - see the Reply language phase above'
     [ $mem_failed = 0 ] && say 'claude-mem : worker running' || say 'claude-mem : worker NOT running'
     [ -n "$plugin_failed" ] && say "plugins    : NOT installed: $plugin_failed" || say 'plugins    : installed'
     [ -n "$ext_failed" ] && say "extensions : NOT installed:$ext_failed"

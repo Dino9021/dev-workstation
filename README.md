@@ -94,6 +94,7 @@ curl -fsSLo /tmp/install.sh https://raw.githubusercontent.com/Dino9021/dev-works
 | [`claude-mem/`](claude-mem/) | **claude-mem**，跨 session 的記憶。預設就裝。腳本化安裝需要三條指令，其中一條幾乎所有人都會漏掉；也說明它跟專案自己的 `Memory/` 資料夾要怎麼區分 |
 | [`general-claude-md/`](general-claude-md/) | 三份給 AI 代理讀的指令檔：`user-CLAUDE.md` 放到 `~/.claude/CLAUDE.md`（整台機器每個專案都載入）、`VERIFICATION-LESSONS.md` 放到 `~/.claude/docs/`、`project-CLAUDE.md` 是每個專案自己的 `CLAUDE.md` 範本 |
 | [`parallel-agent-operations/`](parallel-agent-operations/) | 一段可貼進 `CLAUDE.md` 的規則，阻止 AI 代理自作主張一次派出幾十個子代理——它看不到自己會燒掉多少額度 |
+| [`reply-language/`](reply-language/) | 讓 Claude Code 一律用**正體中文**跟你說話的三層設定：`~/.claude/settings.json` 裡的 `language` 鍵、一個每回合把規則送到模型面前的 `UserPromptSubmit` hook，以及一個在某回合給你看的文字主要是英文時擋下一次、要求改寫的 `Stop` hook。hook 本體 `zh-tw-reply.py` 是純 Python，Windows 與 macOS 共用同一份；兩邊各有自己的安裝腳本（`install.ps1` / `install.sh`） |
 | [`Tools/`](Tools/) | [`deploy.py`](Tools/deploy.py) 負責放置上面那三份指令檔：有 manifest 記錄、會先備份、**不會覆蓋你自己改過的檔案**。[`test_deploy.py`](Tools/test_deploy.py) 是它的測試。[`ShowClaudeCodePricing.ps1`](Tools/ShowClaudeCodePricing.ps1) 印出 dispatch-guard 的模型計價表——派工給子代理之前想知道哪個模型多少錢就跑它，可以直接雙擊，看完按任意鍵關閉 |
 
 每個資料夾都有自己的逐步指南。某一步失敗、或想手動接手時，要讀的是那幾份。
@@ -264,8 +265,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 3. **VS Code 擴充套件**——`anthropic.claude-code`（Claude Code extension），用 VS Code 自己的 `code --install-extension` 安裝
 4. **指令檔**——`Tools/deploy.py` 放置使用者層級的兩份與專案層級的範本
 5. **圖譜伺服器**——`graph-servers/install.ps1` 裝兩台伺服器、註冊 MCP、掛 refresh hook 與 post-commit hook、建第一次索引、啟動背景監看服務
-6. **claude-mem**——跨 session 記憶，純本機
-7. **Claude Code 外掛**——`dispatch-guard`（本專案運作所依據的規則，以及強制執行它們的 hook）與 `mattpocock-skills`（TDD、除錯、code review、領域建模等 skills）
+6. **回覆語言**——`reply-language/install.ps1` 把「跟你說話一律用正體中文」這條規則裝進 Claude Code：hook 複製到 `~\.claude\hooks\zh-tw-reply.py`，再把 `language` 鍵與兩個 hook 併進 `~\.claude\settings.json`。**你已經設好的值不會被動**，別的工具的 hook 也不會被動；重跑不會多出第二份，但指令字串變了會就地更新——一鍵更新能更新到它，靠的就是這一點。這一步失敗**不會**中斷整個安裝
+7. **claude-mem**——跨 session 記憶，純本機
+8. **Claude Code 外掛**——`dispatch-guard`（本專案運作所依據的規則，以及強制執行它們的 hook）與 `mattpocock-skills`（TDD、除錯、code review、領域建模等 skills）
 
 ⚠ `dispatch-guard` 會伸手到這個專案以外：它會為整台機器裝一條狀態列和一個背景額度監看工作。2026-10-06 起它是預設安裝（原本藏在 `-All` 後面，該參數已取消）。
 
@@ -328,6 +330,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Repo C:\code\my-project
 ⚠ **它只安裝「不存在」的工具，絕不替換你自己選的版本。** 已安裝但版本太舊，會停在前置需求閘門，並印出該閘門自己的升級指令。替換你選定的工具鏈不是這支腳本該做的決定。
 
 ⚠ **其中一步可能會問你問題。** 在真正的終端機裡執行時，claude-mem 的安裝程式可能顯示一個比較付費雲端方案與純本機模式的畫面。腳本會在那一步**開始之前**先印出說明，答案是**本機**——那正是它傳進去的旗標已經選好的。無人職守執行時它完全不會問。細節見 [`claude-mem/README.md`](claude-mem/README.md)。
+
+⚠ **`reply-language/` 會改你的 `~\.claude\settings.json`，而且會改變 Claude Code 的行為。** 它加一個 `language` 鍵和兩個 hook。其中 `Stop` hook 在判定某一回合給你看的文字主要是英文時，會**把那一回合擋下一次**並要求改用正體中文重寫——每回合最多一次，不會變成無限迴圈；程式碼區塊、行內程式碼與網址在判定時都會先剔除，所以中文回覆裡夾著檔名和指令不會誤觸。寫入前備份成 `settings.json.bak-<時間戳>`，寫入後逐項核對（你原有的 `language` 值、別的工具的 hook、其他每一個鍵都必須一字不差），任何一項對不上就整個還原。`~\.claude\hooks\zh-tw-reply.py` 若已存在且內容不同，舊的會留成 `zh-tw-reply.py.local-<時間戳>`。**要停用**就把 `settings.json` 裡那兩個 hook 項目刪掉——下次跑安裝腳本會把它們加回來。
 
 ⚠ **`graph-servers/graph-refresh.ps1` 需要 PowerShell 7。** 它是使用者層級的 hook，由 post-commit 與 SessionStart 兩處以 `powershell`（5.1）啟動，所以它會自己重啟到 pwsh；真的找不到 PowerShell 7 就拒絕執行並留下一行 log。正常情況下不會遇到——安裝流程第一步就把 PowerShell 7 裝好了——只有事後被移除才會碰到。它拒絕時 post-commit 仍然回傳 0，**不會讓任何人的 `git commit` 失敗**。
 
@@ -536,6 +540,7 @@ from now, on another machine, it still installs."
 | [`claude-mem/`](claude-mem/) | **claude-mem**, cross-session memory, installed by default. The three commands a scripted install needs, one of which nearly everybody leaves out, and how to keep it from being confused with a project's own `Memory/` folder |
 | [`general-claude-md/`](general-claude-md/) | Three instruction files for an AI agent: `user-CLAUDE.md` goes to `~/.claude/CLAUDE.md` (loaded in every project on the machine), `VERIFICATION-LESSONS.md` to `~/.claude/docs/`, and `project-CLAUDE.md` is the template for each project's own `CLAUDE.md` |
 | [`parallel-agent-operations/`](parallel-agent-operations/) | A `CLAUDE.md` rule that stops an agent fanning out into dozens of subagents on its own — it cannot see the session budget it would burn |
+| [`reply-language/`](reply-language/) | Three layers that make Claude Code answer you in **Traditional Chinese**: the `language` key in `~/.claude/settings.json`, a `UserPromptSubmit` hook that puts the rule in front of the model every turn, and a `Stop` hook that blocks a turn once and asks for a rewrite when the prose it showed you was mostly English. The hook itself, `zh-tw-reply.py`, is plain Python and is the same file on both platforms; each has its own installer (`install.ps1` / `install.sh`) |
 | [`Tools/`](Tools/) | [`deploy.py`](Tools/deploy.py) places those three instruction files: manifest-tracked, backed up first, and it **never overwrites a file you edited**. [`test_deploy.py`](Tools/test_deploy.py) is its test suite. [`ShowClaudeCodePricing.ps1`](Tools/ShowClaudeCodePricing.ps1) prints dispatch-guard's model pricing table — run it when you want to know what a model costs before dispatching a sub-agent; double-click it, and it waits for a key before closing |
 
 Each folder carries its own step-by-step guide. Those are the ones to read when a step
@@ -764,8 +769,14 @@ to it.
 5. **Graph servers** — `graph-servers/install.ps1` installs both servers, registers the MCP
    entries, wires the refresh and post-commit hooks, builds the first index and starts the
    watch daemon
-6. **claude-mem** — cross-session memory, local only
-7. **Claude Code plugins** — `dispatch-guard` (the rules this repository runs on and the
+6. **Reply language** — `reply-language/install.ps1` installs the rule that every reply to
+   you is in Traditional Chinese: the hook is copied to `~\.claude\hooks\zh-tw-reply.py`,
+   and the `language` key plus two hooks are merged into `~\.claude\settings.json`. **A
+   value you already set is left alone**, and so are other tools' hooks; a re-run never
+   adds a second copy, but a command string that has CHANGED is rewritten in place — which
+   is what lets the one-command update reach it. A failure here does **not** stop the run
+7. **claude-mem** — cross-session memory, local only
+8. **Claude Code plugins** — `dispatch-guard` (the rules this repository runs on and the
    hook that enforces them) and `mattpocock-skills` (skills: TDD, diagnosing bugs, code
    review, domain modelling)
 
@@ -858,6 +869,19 @@ can show a screen comparing its paid cloud tier with local-only mode. The script
 explanation immediately **before** that step, and the answer is **local** — which is what
 the flags it passes already select. Run unattended it does not ask at all. Details in
 [`claude-mem/README.md`](claude-mem/README.md).
+
+⚠ **`reply-language/` edits your `~\.claude\settings.json`, and it changes how Claude Code
+behaves.** It adds a `language` key and two hooks. The `Stop` hook **blocks a turn once**
+and asks for a rewrite in Traditional Chinese when it judges the prose shown to you was
+mostly English - at most once per turn, so it cannot loop; code blocks, inline code and
+URLs are stripped before it measures, so a Chinese reply full of file names and commands
+does not trigger it. The file is backed up as `settings.json.bak-<stamp>` before the
+write, and checked item by item afterwards - a `language` value you had already set, every
+other tool's hooks, and every other key must come back byte for byte - with the whole file
+restored if any check fails. If `~\.claude\hooks\zh-tw-reply.py` already exists and
+differs, the previous one is kept as `zh-tw-reply.py.local-<stamp>`. **To turn it off,**
+delete those two hook entries from `settings.json` - the next run of the installer puts
+them back.
 
 ⚠ **`graph-servers/graph-refresh.ps1` needs PowerShell 7.** It is a user-scope hook,
 started as `powershell` (5.1) by both post-commit and SessionStart, so it relaunches itself

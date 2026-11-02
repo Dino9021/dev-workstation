@@ -1180,6 +1180,11 @@ $script:toolsRestartPending = @()
 # What the self-update did, for the end-of-run summary. A line printed at the top of a
 # forty-minute run is a line nobody reads.
 $script:updateNote = $null
+# $null until phase 4b has run at all - a -CheckOnly run and any run that stops earlier
+# never reach it, and the closing summary must say nothing rather than "0". Initialised
+# here on purpose: this script's own comments at lines 1156 and 3058 record that an
+# undefined variable reads as $null right up until somebody adds Set-StrictMode.
+$script:replyLangExit = $null
 
 function Start-RunLog {
     param([string] $Path)
@@ -2138,6 +2143,51 @@ function Invoke-SelfTest {
         $probe = @(@('   press Y or N - 12s left, and no ' + 'answer means N ... ') |
                    Where-Object { $_ -like $needle })
         Check 'order: control - the countdown scan still fires on a real one' ($probe.Count -eq 1)
+
+        # ---- the owner's reply-language rule is WIRED IN, and in the right place.
+        # Needles glued at runtime for the reason spelled out at the top of this block:
+        # written plainly, these four lines would be the first occurrence of what they
+        # search for and the scan would measure this test against itself.
+        #
+        # Without these cases the step is invisible to every gate in this file: it could
+        # be deleted, or moved after a Stop-Run, and the suite would stay green. The
+        # check-only case is the one that matters most - a -CheckOnly that silently
+        # stopped reporting a phase is exactly the shape that bit -PatchOnly -CheckOnly.
+        $qGraphRun  = Find-SourceLine $meSrc ('& pwsh ' + '@graphArgs')
+        $qReplyRun  = Find-SourceLine $meSrc ('-File $replyLang ' + '2>&1')
+        $qReplyChk  = Find-SourceLine $meSrc ('-File $replyLang ' + '-CheckOnly')
+        $qMemPhase  = Find-SourceLine $meSrc ('Write-Phase ' + '"claude-mem"')
+        Check 'reply-language: control - all four landmarks were found' `
+            (($qGraphRun -gt 0) -and ($qReplyRun -gt 0) -and ($qReplyChk -gt 0) -and ($qMemPhase -gt 0))
+        # ⚠ EVERY ONE OF THESE RESTATES `-gt 0` RATHER THAN LEANING ON THE CONTROL ABOVE.
+        # A missing landmark is 0, and `0 -lt $qMemPhase` is TRUE - so with the step
+        # deleted outright these cases passed while measuring nothing. Measured by
+        # mutation 2026-11-02: deleting the call left "it runs before claude-mem" green.
+        Check 'reply-language: it runs after the graph servers' `
+            (($qGraphRun -gt 0) -and ($qReplyRun -gt 0) -and ($qGraphRun -lt $qReplyRun))
+        Check 'reply-language: it runs before claude-mem' `
+            (($qReplyRun -gt 0) -and ($qMemPhase -gt 0) -and ($qReplyRun -lt $qMemPhase))
+        Check 'reply-language: -CheckOnly reports it too'       ($qReplyChk -gt 0)
+        # ...and reports it from INSIDE the check-only branch. The branch's own closing
+        # line is the landmark, NOT its Stop-Run: `Stop-Run 0` appears several times in
+        # this file and Find-SourceLine returns the FIRST, which is far above this branch
+        # - measured, and it failed this case while the wiring was perfectly correct.
+        $qCheckEnd = Find-SourceLine $meSrc ('CHECK ONLY: nothing was ' + 'installed')
+        Check 'reply-language: the -CheckOnly report is inside that branch' `
+            (($qReplyChk -gt 0) -and ($qCheckEnd -gt 0) -and ($qReplyChk -lt $qCheckEnd))
+        # It must NOT be fatal: a preference failing has no business stopping claude-mem
+        # and the plugins. The guard is that no Stop-Run reads its exit variable.
+        # ⛔ BOTH NEEDLES GLUED, AND THE PROBE'S TEXT TOO. Written plainly, this very line
+        # holds both words, so the scan found ITSELF and reported the step as fatal -
+        # measured here 2026-11-02, the fourth time this file has caught a source scan
+        # matching its own literals.
+        $sr = 'Stop-' + 'Run'; $rle = 'replyLang' + 'Exit'
+        $fatalReply = @($codeLines | Where-Object { $_.Contains($sr) -and $_.Contains($rle) })
+        Check 'reply-language: a failure does not stop the run' ($fatalReply.Count -eq 0)
+        # The lookalike: the scan must still fire if somebody makes it fatal.
+        $fatalProbe = @(@('    ' + $sr + ' $script:' + $rle) |
+                        Where-Object { $_.Contains($sr) -and $_.Contains($rle) })
+        Check 'reply-language: control - the fatal scan fires on a real one' ($fatalProbe.Count -eq 1)
     }
 
     # And the live wiring, as a smoke test. ⚠ This one CANNOT fail on a host whose registry
@@ -3444,6 +3494,7 @@ if (-not $CheckOnly) {
         Write-Host "                          (need an administrator, and nothing here depends on them)" -ForegroundColor Yellow
     }
     Write-Host ("   claude-mem Cowork    : {0}" -f $(if ($Cowork -eq 'yes') { 'YES - sends tool use to cmem.ai' } else { 'no' }))
+    Write-Host "   reply language       : the owner's Traditional Chinese rule for Claude Code"
     Write-Host "   log                  : $script:logFile"
     Write-Host ""
     Write-Host "   From here it runs to the end without asking anything else."
@@ -3939,6 +3990,7 @@ else {
 
 $deploy = Join-Path $here 'Tools\deploy.py'
 $graph = Join-Path $here 'graph-servers\install.ps1'
+$replyLang = Join-Path $here 'reply-language\install.ps1'
 if (-not (Test-Path $deploy)) { Write-Host "missing $deploy" -ForegroundColor Red; Stop-Run 1 }
 if (-not (Test-Path $graph)) { Write-Host "missing $graph" -ForegroundColor Red; Stop-Run 1 }
 
@@ -4034,6 +4086,12 @@ if ($CheckOnly) {
             if ($pl.Deploy) { Write-Host "       python Tools\deploy.py --user --apply $($pl.Deploy)" }
         }
     }
+    # The owner's standing reply-language rule. Its own -CheckOnly writes nothing and
+    # reports the same three things the macOS half reports (install.sh:824-825).
+    Write-Host ""
+    Write-Host "   reply language - the owner's Traditional Chinese rule:" -ForegroundColor Yellow
+    & pwsh -NoProfile -ExecutionPolicy Bypass -File $replyLang -CheckOnly 2>&1 |
+        ForEach-Object { Write-Host $_ }
     Write-Host "CHECK ONLY: nothing was installed or written apart from the log below." -ForegroundColor Yellow
     Write-Host "Re-run without -CheckOnly to carry the plan out." -ForegroundColor Yellow
     Stop-Run 0
@@ -4079,6 +4137,24 @@ else {
     Write-Host ""
     Write-Host "Read the ===== summary ===== table above: any row starting FAILED is a step" -ForegroundColor Yellow
     Write-Host "that did not complete. Exit code 0 from that script does not rule it out." -ForegroundColor Yellow
+}
+
+# ------------------------------------------------- phase 4b: the reply-language rule
+# The owner's standing rule, 2026-11-02: every reply to the owner in Traditional Chinese.
+# Three layers - settings.json "language", a UserPromptSubmit hook and a Stop hook - the
+# same three the macOS half installs, in the same position in the run (install.sh:839),
+# so the two platforms' logs read alike.
+#
+# NOT FATAL, and deliberately so: it is a preference, and claude-mem and the plugins below
+# have nothing to do with it. The macOS half is wired the same way (it keeps lang_rc and
+# carries on). A failure is reported here and again in the closing summary.
+Write-Phase "Reply language: the owner's Traditional Chinese rule"
+& pwsh -NoProfile -ExecutionPolicy Bypass -File $replyLang 2>&1 | ForEach-Object { Write-Host $_ }
+$script:replyLangExit = $LASTEXITCODE
+if ($script:replyLangExit -ne 0) {
+    Write-Host ""
+    Write-Host "reply-language/install.ps1 exited $($script:replyLangExit) - that rule is NOT in" -ForegroundColor Yellow
+    Write-Host "place. Nothing else in this run depends on it; read its output above." -ForegroundColor Yellow
 }
 
 # ------------------------------------------------------------ what is left for you
@@ -4290,6 +4366,17 @@ if ($script:toolsPresent.Count -gt 0) {
 }
 if ($script:toolsInstalled.Count -gt 0) {
     Write-Host "   installed by this run:      $($script:toolsInstalled -join ', ')" -ForegroundColor Green
+}
+# Said twice on purpose, like the update note above it: phase 4b runs well before the
+# last third of a long run, and a failure reported only there has scrolled away.
+if ($null -ne $script:replyLangExit) {
+    if ($script:replyLangExit -eq 0) {
+        Write-Host "   reply language:             in place - replies to you in Traditional Chinese" -ForegroundColor Green
+        Write-Host "                               (takes effect in the NEXT Claude Code session)"
+    }
+    else {
+        Write-Host "   reply language:             FAILED (exit $($script:replyLangExit)) - the rule is NOT in place" -ForegroundColor Yellow
+    }
 }
 # ⛔ THE THING PEOPLE ACTUALLY GET CAUGHT BY, and until 2026-10-14 this script never said
 # it. Half of what it installs is PER-USER, and it lands in the profile of whoever RAN it.
