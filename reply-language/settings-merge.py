@@ -506,6 +506,36 @@ def self_test():
     t('stop: a Chinese turn citing two unbackticked WINDOWS paths passes',
       quiet('stop', payload(transcript_path=winp)))
 
+    # ---- the skill-banner exemption, driven end to end through the real command ------
+    # dispatch-guard's unattended-work skill requires an English banner as a session's
+    # FIRST output, verbatim. Measured 2026-11-02: that line alone, and that line with a
+    # full Chinese reply after it, were judged mostly English - so every such turn was
+    # blocked and the two rules could not both be met. Standard agreed by M1, W1 and both
+    # DispatchGuard sessions at the owner's request: at most ONE anchored banner line per
+    # segment is dropped before measuring.
+    banner = ('⭐ **`unattended-work` ACTIVE** — sequential dispatch · plan '
+              'on disk before dispatch · refute the fix, not just the code · '
+              'stall test at 2 rounds · mutation-check every fail-open guard · '
+              'exit bar before handing back.')
+    # ⚠ THIS CASE ALSO PINS THE ORDER OF TWO SUBSTITUTIONS. The banner carries its own
+    # backticks around the skill name, so if the inline-code strip ran first it would eat
+    # them, the anchored pattern would no longer match, and the banner would be measured
+    # as the English it is. The exemption must run BEFORE that strip (M1, zh-tw-reply.py).
+    bnp = os.path.join(sb, 'banner.jsonl')
+    transcript(bnp, banner + '\n\n我已經做完了，測試全部通過，請你確認。')
+    t('stop: a skill ACTIVE banner followed by a Chinese reply passes',
+      quiet('stop', payload(transcript_path=bnp)))
+
+    # ...and the exemption must not become a licence for the rest of the turn.
+    enb = os.path.join(sb, 'banner-en.jsonl')
+    transcript(enb, banner + '\n\n' + en)
+    out3, _, _ = hook_run('stop', payload(transcript_path=enb))
+    try:
+        d3 = json.loads(out3.decode('utf-8')).get('decision')
+    except (ValueError, UnicodeDecodeError):
+        d3 = None
+    t('stop: English AFTER the banner is still blocked', d3 == 'block')
+
     shutil.rmtree(sb, ignore_errors=True)
     print('')
     print('  %d PASS  %d FAIL' % (state['pass'], state['fail']))

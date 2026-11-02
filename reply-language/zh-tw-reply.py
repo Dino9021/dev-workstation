@@ -48,7 +48,19 @@ def turn_texts(transcript_path):
     return texts
 
 
+# A skill-required ACTIVE banner, e.g. dispatch-guard's unattended-work:
+#   ⭐ **`unattended-work` ACTIVE** — sequential dispatch · ...
+# The skill makes it the session's first output, verbatim, in English; measured
+# 2026-11-02 it alone - and with a full Chinese reply after it - was judged mostly English,
+# so every such turn was blocked and both rules could not be met. AT MOST ONE such line per
+# text segment is dropped before measuring (agreed by M1, W1 and both DispatchGuard sessions
+# at the owner's request). Anchored on the shape, never on "a line starting with ⭐", which is
+# ordinary punctuation here. Known residual: English typed onto that one line escapes.
+BANNER = re.compile(r"^\s*(?:>\s*)?⭐\s+\*\*`[A-Za-z0-9:_-]+`\s+ACTIVE\*\*.*$", re.M)
+
+
 def prose_is_mostly_english(text):
+    text = BANNER.sub(" ", text, count=1)
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
     text = re.sub(r"`[^`]*`", " ", text)
     # [/\\]: a Windows path (D:\WorkSpace\...) is a path too - with "/" alone a Chinese reply

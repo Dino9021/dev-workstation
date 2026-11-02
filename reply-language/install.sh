@@ -148,6 +148,18 @@ EOF
     printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
         "$(/usr/bin/jq -cn --arg t "$wz" '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:$t}]}}')" >"$sb/win.jsonl"
     t 'hook stop: a Chinese reply with Windows paths passes' "$([ -z "$(/usr/bin/jq -cn --arg p "$sb/win.jsonl" '{transcript_path:$p}' | python3 -I "$h" stop)" ]; echo $?)"
+    # the skill banner: exempt as ONE line, never as a licence for English around it
+    bn='⭐ **`unattended-work` ACTIVE** — sequential dispatch · plan on disk before dispatch · refute the fix, not just the code · stall test at 2 rounds · mutation-check every fail-open guard · exit bar before handing back.'
+    zh='這一輪的工作已經完成，結果都記錄在任務資料夾裡，接下來等擁有者決定下一步。'
+    tr() { printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
+        "$(/usr/bin/jq -cn --arg t "$1" '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:$t}]}}')" >"$sb/b.jsonl"
+        /usr/bin/jq -cn --arg p "$sb/b.jsonl" '{transcript_path:$p}' | python3 -I "$h" stop; }
+    t 'banner: alone passes' "$([ -z "$(tr "$bn")" ]; echo $?)"
+    t 'banner: as a blockquote, plus a Chinese reply, passes' "$([ -z "$(tr "> $bn
+$zh")" ]; echo $?)"
+    t 'banner: an English paragraph AFTER it still blocks' "$(tr "$bn
+$en" | /usr/bin/jq -e '.decision == "block"' >/dev/null; echo $?)"
+    t 'banner: a line merely starting with ⭐ is not exempt' "$(tr "⭐ $en" | /usr/bin/jq -e '.decision == "block"' >/dev/null; echo $?)"
     t 'hook stop: never blocks twice (stop_hook_active)' "$([ -z "$(/usr/bin/jq -cn --arg p "$sb/en.jsonl" '{transcript_path:$p,stop_hook_active:true}' | python3 -I "$h" stop)" ]; echo $?)"
     rm -rf "$sb"
     say ''; say "  $pass PASS  $fail FAIL"
