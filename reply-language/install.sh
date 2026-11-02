@@ -160,6 +160,14 @@ $zh")" ]; echo $?)"
     t 'banner: an English paragraph AFTER it still blocks' "$(tr "$bn
 $en" | /usr/bin/jq -e '.decision == "block"' >/dev/null; echo $?)"
     t 'banner: a line merely starting with ⭐ is not exempt' "$(tr "⭐ $en" | /usr/bin/jq -e '.decision == "block"' >/dev/null; echo $?)"
+    # only the final reply counts: a running note before a tool call may be English (owner, 2026-11-02)
+    tu='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Bash","input":{}}]}}'
+    tx='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"ok"}]}}'
+    seg() { /usr/bin/jq -cn --arg t "$1" '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:$t}]}}'; }
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' "$(seg "$en")" "$tu" "$tx" "$(seg "$zh")" >"$sb/note.jsonl"
+    t 'hook stop: an English note before a tool call, then a Chinese reply, passes' "$([ -z "$(/usr/bin/jq -cn --arg p "$sb/note.jsonl" '{transcript_path:$p}' | python3 -I "$h" stop)" ]; echo $?)"
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' "$(seg "$zh")" "$tu" "$tx" "$(seg "$en")" >"$sb/final.jsonl"
+    t 'hook stop: an English final reply after a Chinese note still blocks' "$(/usr/bin/jq -cn --arg p "$sb/final.jsonl" '{transcript_path:$p}' | python3 -I "$h" stop | /usr/bin/jq -e '.decision == "block"' >/dev/null; echo $?)"
     t 'hook stop: never blocks twice (stop_hook_active)' "$([ -z "$(/usr/bin/jq -cn --arg p "$sb/en.jsonl" '{transcript_path:$p,stop_hook_active:true}' | python3 -I "$h" stop)" ]; echo $?)"
     rm -rf "$sb"
     say ''; say "  $pass PASS  $fail FAIL"

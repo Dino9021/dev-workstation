@@ -536,6 +536,52 @@ def self_test():
         d3 = None
     t('stop: English AFTER the banner is still blocked', d3 == 'block')
 
+    # ---- only the FINAL reply is measured (owner, 2026-11-02) -----------------------
+    # The rule is for reporting to and discussing with the owner, not for the work in
+    # progress, so a running note between tool calls may be in any language. M1 narrowed
+    # the hook to the text after the turn's LAST tool call (final_reply(), 5aa0b40).
+    def transcript_turn(path, note, reply):
+        """A realistic turn, in the shape a real transcript has it: a running note and a
+        tool call in one assistant message, the tool_result as a user entry, then the
+        reply.
+
+        ⚠ WHAT THESE CASES PIN IS THE BEHAVIOUR, NOT THE MECHANISM, and the first draft
+        of this comment claimed otherwise. final_reply() has TWO guards that reach the
+        same answer here - a tool_use block discards what came before it, and a
+        tool_result user entry does not start a new turn. Measured by mutation
+        2026-11-02: removing the tool_use reset alone turns the next case red (D-1), but
+        removing BOTH at once leaves this suite fully green (D-3), because either one
+        alone still discards the note. In every real turn shape a tool_use is followed by
+        a tool_result, so the two are redundant in practice and no fixture here separates
+        them. The owner's rule only asks that the FINAL reply be measured, which both
+        satisfy; this note exists so nobody reads D-1 as proof that the pair is pinned."""
+        with open(path, 'w', encoding='utf-8', newline='\n') as f:
+            for entry in (
+                    {'type': 'user', 'message': {'role': 'user', 'content': 'hi'}},
+                    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+                        {'type': 'text', 'text': note},
+                        {'type': 'tool_use', 'id': 'tu1', 'name': 'Bash', 'input': {}}]}},
+                    {'type': 'user', 'message': {'role': 'user', 'content': [
+                        {'type': 'tool_result', 'tool_use_id': 'tu1', 'content': 'ok'}]}},
+                    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+                        {'type': 'text', 'text': reply}]}}):
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+    note_en = os.path.join(sb, 'note-en.jsonl')
+    transcript_turn(note_en, en, '我已經做完了，測試全部通過，請你確認。')
+    t('stop: an English running note, then a Chinese final reply, passes',
+      quiet('stop', payload(transcript_path=note_en)))
+
+    # ...and the narrowing must not become a way out: the FINAL reply still counts.
+    note_zh = os.path.join(sb, 'note-zh.jsonl')
+    transcript_turn(note_zh, '先讀一下檔案，確認目前的狀態。', en)
+    out4, _, _ = hook_run('stop', payload(transcript_path=note_zh))
+    try:
+        d4 = json.loads(out4.decode('utf-8')).get('decision')
+    except (ValueError, UnicodeDecodeError):
+        d4 = None
+    t('stop: a Chinese note, then an English final reply, is blocked', d4 == 'block')
+
     shutil.rmtree(sb, ignore_errors=True)
     print('')
     print('  %d PASS  %d FAIL' % (state['pass'], state['fail']))

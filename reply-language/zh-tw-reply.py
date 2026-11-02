@@ -2,7 +2,10 @@
 """Owner's standing rule: every reply to the owner is in Traditional Chinese (正體中文).
 
   zh-tw-reply.py remind   UserPromptSubmit: put the rule in front of the model on every turn.
-  zh-tw-reply.py stop     Stop: if any text the model showed the owner this turn is mostly English, block once and ask for a rewrite.
+  zh-tw-reply.py stop     Stop: if the turn's final reply (the text after its last tool call) is mostly English, block once and ask for a rewrite.
+
+Only the final reply is measured: running notes between tool calls may be in any language (owner, 2026-11-02:
+the rule is for reporting and discussing with the owner, not for the work in progress).
 
 Code blocks, inline code, URLs and paths are ignored when measuring, so commit hashes, file names and
 commands inside a Chinese reply never trigger it. Sub-agents are not affected (they end with SubagentStop).
@@ -12,8 +15,8 @@ import re
 import sys
 
 RULE = (
-    "擁有者的永久規則:給擁有者看的每一句話一律用正體中文(白話、少術語),"
-    "包括工具動作之間的短句與最後的回覆。程式碼、指令、檔名、commit 訊息、給其他 AI 的訊息可用英文。"
+    "擁有者的永久規則:向擁有者報告進度、討論、提問,以及每一輪最後的回覆,一律用正體中文(白話、少術語)。"
+    "工具動作之間的過程短句不限語言。程式碼、指令、檔名、commit 訊息、給其他 AI 的訊息可用英文。"
 )
 
 
@@ -21,7 +24,7 @@ def remind():
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": RULE}}, ensure_ascii=False))
 
 
-def turn_texts(transcript_path):
+def final_reply(transcript_path):
     texts = []
     with open(transcript_path, encoding="utf-8") as f:
         for line in f:
@@ -43,7 +46,11 @@ def turn_texts(transcript_path):
             if role != "assistant" or not isinstance(content, list):
                 continue
             for c in content:
-                if isinstance(c, dict) and c.get("type") == "text":
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") == "tool_use":
+                    texts = []  # what came before a tool call was a running note, not the reply
+                elif c.get("type") == "text":
                     texts.append(c.get("text", ""))
     return texts
 
@@ -81,10 +88,10 @@ def stop():
     path = data.get("transcript_path")
     if not path:
         return
-    if any(prose_is_mostly_english(t) for t in turn_texts(path)):
+    if any(prose_is_mostly_english(t) for t in final_reply(path)):
         print(json.dumps({
             "decision": "block",
-            "reason": "你這一輪給擁有者看的文字裡有一段主要是英文。" + RULE + " 請用正體中文把這一輪該告訴擁有者的內容完整重寫一次再結束。",
+            "reason": "你這一輪最後給擁有者的回覆主要是英文。" + RULE + " 請用正體中文把這一輪該告訴擁有者的內容完整重寫一次再結束。",
         }, ensure_ascii=False))
 
 
