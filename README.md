@@ -19,12 +19,16 @@ $u='https://raw.githubusercontent.com/Dino9021/dev-workstation/main/install.ps1'
 
 ⭐ **更新也是同一行，不必記第二個指令。** 它會把最新的 `install.ps1` 抓下來執行，發現
 `C:\WorkSpace\dev-workstation` 已經在了，就先把那份 clone 快轉到最新，再交棒給更新後的那一份
-把該補的都補上。已經裝好的東西不會重裝。
+把該補的都補上。已經裝好的東西不會重裝。**而且這條更新路徑什麼都不問**——磁碟機、
+claude-mem Cowork、Start? 三個問題一個都不會跳出來，因為它找得到那份既有的 clone。詳情見
+下面「已經裝過的機器」那段。
 
 ⭐ **The same line is also the update — there is no second command to remember.** It fetches
 the current `install.ps1`, finds the clone already at `C:\WorkSpace\dev-workstation`,
 fast-forwards it, and hands over to the updated copy to fill in whatever is missing. Anything
-already installed is left alone.
+already installed is left alone. **And this update path asks nothing** — not the drive, not
+claude-mem Cowork, not Start? — because it finds that existing clone. See the "already
+installed" paragraph further down.
 
 完全不互動 / fully unattended:
 

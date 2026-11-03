@@ -517,6 +517,7 @@ self_test() {
     t 'update run: no graph servers is a first install' "$(is "$(update_run_verdict /h/WorkSpace/dw /h/WorkSpace yes no)" first)"
     t 'update run: a clone outside WorkSpace is a first install' "$(is "$(update_run_verdict /h/Downloads/dw /h/WorkSpace yes yes)" first)"
     t 'update run: a sibling named WorkSpace2 is not inside WorkSpace' "$(is "$(update_run_verdict /h/WorkSpace2/dw /h/WorkSpace yes yes)" first)"
+    t 'update run: the WorkSpace folder itself is not inside it' "$(is "$(update_run_verdict /h/WorkSpace /h/WorkSpace yes yes)" first)"
     t 'update run: no WorkSpace folder is a first install' "$(is "$(update_run_verdict /h/WorkSpace/dw '' yes yes)" first)"
 
     st=$(mktemp -d "${TMPDIR:-/tmp}/install-selftest.XXXXXX")
@@ -857,7 +858,11 @@ main() {
     if [ "$mode" = check ]; then
         phase 'Check only'
         say '  a real run would then: apply the CLAUDE.md files, run graph-servers/install.sh,'
-        say '  install claude-mem (and ask about its cloud half, Cowork), and these plugins:'
+        if [ -n "$cowork" ]; then say "  install claude-mem (Cowork: $cowork, from --cowork), and these plugins:"
+        elif update_run; then
+            say '  install claude-mem (update run: it would NOT ask about Cowork - it keeps what is there,'
+            say "  which reads: $(plugin_installed claude-mem-cowork thedotmack && echo installed || echo 'not installed')), and these plugins:"
+        else say '  install claude-mem (and ask about its cloud half, Cowork), and these plugins:'; fi
         plugins
         phase 'Reply language (reply-language/install.sh --check-only)'
         sh "$here/reply-language/install.sh" --check-only

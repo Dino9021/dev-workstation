@@ -326,6 +326,44 @@ function Test-GraphServersRegistered {
     return $true
 }
 
+function Select-ExistingClone {
+    <#
+      Which clone would a lone install.ps1 hand over to? Pure: the caller measures which
+      candidate roots actually hold one, this decides what that list means.
+
+      EXACTLY ONE counts. None means there is nothing on this machine to update, and the
+      run is a first install. TWO OR MORE means a clone on C and another on D, and that is
+      precisely the case where the drive question has a real choice to make - so it is
+      asked, rather than guessed at by taking the first.
+    #>
+    param([string[]] $Roots)
+    $found = @($Roots)
+    if ($found.Count -eq 1) { return $found[0] }
+    return $null
+}
+
+function Get-CoworkSource {
+    <#
+      Where did the Cowork answer come from? Pure, and it exists because the honest answer
+      is not "did the update-run block run" - a value the PERSON passed must never be
+      reported as one this machine was already carrying.
+
+      ⛔ MEASURED, NOT IMAGINED: `install.ps1 -CheckOnly -Cowork yes` on an already set-up
+      machine printed "claude-mem Cowork: yes (update run - left as it was)" while the
+      cloud plugin was NOT installed and the run was about to install it. The label was
+      keyed on the verdict instead of on the value.
+
+      ⚠ It compares the ANSWER with what is on disk rather than tracking provenance,
+      because provenance does not survive the PowerShell 7 handover: the parent forwards
+      -Cowork <value> and the child cannot tell a typed answer from a read one. The known
+      imprecision is -Cowork no on a machine that already has no Cowork, which reads as
+      "left as it was" - true, and it claims no flag either way.
+    #>
+    param([string] $Answer, [string] $OnDisk, [bool] $UpdateRun)
+    if ($UpdateRun -and ($Answer -eq $OnDisk)) { return 'update run - left as it was' }
+    return "from -Cowork $Answer"
+}
+
 function Test-UpdateRun {
     <#
       The three probes, kept out of Get-UpdateRunVerdict so the verdict stays pure.
@@ -1251,7 +1289,8 @@ function Test-PluginInstalled {
 $script:transcribing = $false
 $script:logFile = $null
 $script:prevConsoleEncoding = $null
-# Set only on the path that actually asks the Cowork question. Declared here so the
+# Set on either path that has already TOLD the person the Cowork answer - the question,
+# and the update run that reads it off this machine instead of asking. Declared here so the
 # test that reads it is reading a variable, not relying on an unassigned one being
 # $null - which is the same answer right up until somebody adds Set-StrictMode.
 $script:coworkAsked = $false
@@ -2255,12 +2294,20 @@ function Invoke-SelfTest {
             (($qUpdCowork -gt 0) -and ($qCowork -gt 0) -and ($qUpdCowork -lt $qCowork))
         Check 'update run: the Start? gate consults it' `
             (($qUpdGo -gt 0) -and ($qGo -gt 0) -and ($qUpdGo -lt $qGo))
-        # The cloud plugin's state is READ in all three places it has to be: where an update
+        # The cloud plugin's state is READ in all four places it has to be: where an update
         # run keeps the decision, where the claude-mem phase would otherwise reinstall a
-        # plugin that needs nothing, and in the -CheckOnly report, which must not promise a
-        # question this machine will not be asked. Counted, so losing any one is visible.
-        Check 'update run: the Cowork plugin state is read in all three places' `
-            ((& $countOf ('Test-PluginInstalled $script:settingsPath ' + "'claude-mem-cowork'")) -eq 3)
+        # plugin that needs nothing, in the -CheckOnly report, which must not promise a
+        # question this machine will not be asked, and where the answer is LABELLED, which
+        # may not call a typed flag a decision this machine was already carrying. Counted,
+        # so losing any one is visible.
+        Check 'update run: the Cowork plugin state is read in all four places' `
+            ((& $countOf ('Test-PluginInstalled $script:settingsPath ' + "'claude-mem-cowork'")) -eq 4)
+        # ⛔ AND THE DETECTION ASKS ABOUT THE CLONE, NOT ABOUT $here. Written as
+        # `Test-UpdateRun $here` it was wrong on the README's own update path, and nothing
+        # else in this file would have noticed.
+        $qDetect = Find-SourceLine $meSrc ('$script:updateRun = ' + 'Test-UpdateRun $detectDir')
+        Check 'update run: the verdict is taken on the clone, not on this directory' `
+            (($qDetect -gt 0) -and ((& $countOf ('Test-UpdateRun ' + '$here')) -eq 0))
 
         # No prompt may count down any more: a timed question answers itself for somebody
         # who looked away. Both helpers keep $Seconds in their signature, so the thing to
@@ -2448,6 +2495,28 @@ function Invoke-SelfTest {
         ((Get-UpdateRunVerdict 'd:\workspace\dev-workstation' 'D:\WorkSpace' $true $true) -eq 'update')
     Check 'update run: a trailing backslash is not a different folder' `
         ((Get-UpdateRunVerdict 'D:\WorkSpace\dev-workstation' 'D:\WorkSpace\' $true $true) -eq 'update')
+
+    # ⛔ AND "THIS CLONE" IS NOT ALWAYS THE DIRECTORY THE FILE IS IN. The README's update
+    # instruction downloads install.ps1 into TEMP and runs it from there, so the clone to
+    # ask the three conditions about is the one the bootstrap would hand over to. Two of
+    # them is not an answer - that is exactly when the drive question has a choice to make.
+    Check 'existing clone: exactly one is the one this run would update' `
+        ((Select-ExistingClone @('D:\WorkSpace\dev-workstation')) -eq 'D:\WorkSpace\dev-workstation')
+    Check 'existing clone: none means there is nothing to update' `
+        ($null -eq (Select-ExistingClone @()))
+    Check 'existing clone: two is not an answer, it is the drive question' `
+        ($null -eq (Select-ExistingClone @('C:\WorkSpace\dev-workstation', 'D:\WorkSpace\dev-workstation')))
+
+    # Where the Cowork answer came from. THE ONE THAT WAS WRONG IN THE FIRST VERSION is the
+    # first: a value the person passed, reported as one the machine was already carrying.
+    Check 'cowork source: -Cowork yes against a machine without it is NOT "left as it was"' `
+        ((Get-CoworkSource 'yes' 'no' $true) -eq 'from -Cowork yes')
+    Check 'cowork source: an answer matching the disk on an update run was left as it was' `
+        ((Get-CoworkSource 'no' 'no' $true) -eq 'update run - left as it was')
+    Check 'cowork source: installed, and kept installed, was left as it was' `
+        ((Get-CoworkSource 'yes' 'yes' $true) -eq 'update run - left as it was')
+    Check 'cowork source: on a FIRST install it always came from the flag' `
+        ((Get-CoworkSource 'no' 'no' $false) -eq 'from -Cowork no')
 
     # The third condition reads a real file, so it gets real fixtures. THE ONE THAT MATTERS
     # IS THE HALF-INSTALL: a phase 4 that stopped between the two `claude mcp add` calls
@@ -3436,15 +3505,38 @@ $defaultLetter = $resolved.Root.Substring(0, 1)
 # Decided ONCE, here, because all three questions below consult it. The PowerShell 7 child
 # re-runs this same detection from the top of the file and reaches the same answer, so the
 # verdict does not need forwarding across the handover - unlike the ANSWERS, which do.
-$script:updateRun = Test-UpdateRun $here
+#
+# ⛔ "THIS CLONE" MEANS THE CLONE THIS RUN WILL UPDATE, WHICH IS NOT ALWAYS THE DIRECTORY
+# THE FILE IS SITTING IN - and reading it as $here broke the change on the one path the
+# README calls updating. The README's update instruction IS the one-liner: download
+# install.ps1 into $env:TEMP and run it; it finds the existing clone, fast-forwards it and
+# hands over. On that path $here is TEMP, so condition 1 failed and all three questions came
+# back. Measured 2026-11-03 under Windows PowerShell 5.1: Test-UpdateRun on the clone True,
+# on $env:TEMP False. ⚠ And Windows cannot borrow the macOS answer, where `is_clone "$here"
+# || bootstrap` runs BEFORE the question: here the bootstrap is four hundred lines further
+# down, deliberately, because the questions must be asked before anything is installed.
+# ⇒ So when this file is running alone, find the clone the bootstrap would hand over to and
+# ask the three conditions about THAT. Exactly one answer counts: none means there is
+# nothing to update, and two mean the drive question has a real choice to make again.
+$detectDir = $here
+if (-not (Test-IsClone $here)) {
+    $cloneRoots = @(@($driveCandidates) |
+        ForEach-Object { Join-Path ($_.Letter + ':\WorkSpace') 'dev-workstation' } |
+        Where-Object { Test-IsClone $_ })
+    $existingClone = Select-ExistingClone $cloneRoots
+    if ($existingClone) { $detectDir = $existingClone }
+}
+$script:updateRun = Test-UpdateRun $detectDir
 
 # ⭐ ON AN UPDATE RUN THE DRIVE IS NOT A CHOICE, IT IS A FACT: the clone is already sitting
-# in the WorkSpace the question is about. Read it off $here, because Resolve-WorkspaceRoot
-# with no letter falls back to C - which would print C:\WorkSpace underneath a run whose
-# clone is on D. If that letter will not resolve after all, stand down from the whole
-# verdict rather than carry on with a root nobody chose: the questions get asked.
+# in the WorkSpace the question is about. Read it off that clone, because
+# Resolve-WorkspaceRoot with no letter falls back to C - which would print C:\WorkSpace
+# underneath a run whose clone is on D, and on the lone-file path would send the bootstrap
+# looking for the clone on the wrong drive entirely. If that letter will not resolve after
+# all, stand down from the whole verdict rather than carry on with a root nobody chose: the
+# questions get asked.
 if ($script:updateRun -and (-not $Drive)) {
-    $ownLetter = $here.Substring(0, 1).ToUpperInvariant()
+    $ownLetter = $detectDir.Substring(0, 1).ToUpperInvariant()
     $fromClone = Resolve-WorkspaceRoot -Letter $ownLetter -Candidates $driveCandidates
     if ($fromClone.Root) { $Drive = $ownLetter; $resolved = $fromClone }
     else { $script:updateRun = $false }
@@ -3487,6 +3579,11 @@ if ($script:updateRun -and ($Cowork -eq 'ask') -and -not $CheckOnly) {
     Write-Host ("  WorkSpace: {0} - this clone is already inside it" -f $WORKSPACE_ROOT)
     Write-Host ("  claude-mem Cowork: {0} - left as it is (-Cowork yes|no to change it)" -f `
                 $(if ($coworkHere) { 'installed' } else { 'not installed' }))
+    # ⚠ THE SAME FLAG THE QUESTION SETS, and for the same reason: this process has already
+    # told the person the answer. Without it a run started directly under PowerShell 7 -
+    # no handover, so one process does the whole run - printed the Cowork answer here AND
+    # again after the handover point, saying the same thing twice in six lines.
+    $script:coworkAsked = $true
 }
 
 # Printed only when there is actually something to ask. Given -Cowork explicitly
@@ -3984,8 +4081,8 @@ if (-not (Test-IsClone $here)) {
 # value either way. It re-runs the detection instead, which is why $script:updateRun is
 # readable here at all.
 if ($Cowork -ne 'ask' -and -not $script:coworkAsked) {
-    $coworkFrom = $(if ($script:updateRun) { 'update run - left as it was' }
-                    else { "from -Cowork $Cowork" })
+    $onDisk = $(if (Test-PluginInstalled $script:settingsPath 'claude-mem-cowork' (Join-Path 'thedotmack' 'claude-mem-cowork')) { 'yes' } else { 'no' })
+    $coworkFrom = Get-CoworkSource $Cowork $onDisk $script:updateRun
     Write-Host ""
     Write-Host "claude-mem Cowork: $Cowork ($coworkFrom)" -ForegroundColor Cyan
 }
