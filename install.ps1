@@ -53,8 +53,15 @@
   marketplace entry says its hooks "stream tool use to cmem.ai" - so it is never
   installed without a decision. -Cowork yes/no settles it from the command line.
   Given neither, the run ASKS ONCE, at the very start, after printing what it is
-  about to do and BEFORE installing anything: 30 seconds, and no answer means no.
-  With stdin redirected it does not ask at all and the answer is no.
+  about to do and BEFORE installing anything, and it WAITS for the answer rather
+  than counting down. With stdin redirected it does not ask at all: the answer is no.
+
+  AND ON AN ALREADY-INSTALLED MACHINE IT ASKS NOTHING AT ALL (owner, 2026-11-03).
+  Get-UpdateRunVerdict decides, from three conditions it documents; the macOS half
+  decides from the same three so the two installers behave alike. Then the drive
+  question, the Cowork question and the Start? gate are all skipped: the drive comes
+  from where this clone actually sits, Cowork is READ and kept exactly as it is, and
+  the plan summary still prints before the run starts. -Drive and -Cowork override.
 
   DELIBERATELY NOT HERE:
 
@@ -241,6 +248,99 @@ function Test-IsClone {
     # test, not .git: a ZIP download has no .git and is a perfectly good copy.
     param([string] $Dir)
     return (Test-Path -LiteralPath (Join-Path $Dir 'Tools\deploy.py'))
+}
+
+function Get-UpdateRunVerdict {
+    <#
+      'update' or 'first' - is this workstation already set up, so that the three
+      questions at the top of the run have nothing left to ask?
+
+      Owner, 2026-11-03: an already-installed machine must not be asked which drive
+      WorkSpace goes on, whether to install claude-mem Cowork, or Start? - it just
+      updates; and both operating systems must decide it the same way. Agreed with the
+      macOS half (install.sh update_run_verdict, private bf8283b / 08d3619), so ALL
+      THREE of these must hold, and no single one of them decides:
+
+        1. this clone sits strictly INSIDE a WorkSpace folder at the root of its own
+           drive. D:\WorkSpace\dev-workstation yes; D:\WorkSpace no, that is the folder
+           itself; D:\WorkSpace2\dev-workstation no, a different folder that starts the
+           same way;
+        2. claude-mem is installed;
+        3. both graph MCP servers are registered.
+
+      ⛔ IT DETECTS "THIS WORKSTATION IS SET UP", NOT "THIS INSTALLER RAN HERE", and
+      that is measured rather than assumed. On PENRIL all three read present while
+      install.ps1 has NEVER performed a real install: the only two logs it has ever
+      written, Debug\install-20261008-083815.log and Debug\install-20261008-083913.log,
+      are both -CheckOnly runs - their transcript header reads "-File ./install.ps1
+      -CheckOnly" and their banner "CHECK ONLY - nothing will be installed or written".
+      claude-mem, both graph servers and the CLAUDE.md pair got there by other routes.
+      ⇒ The verdict is still the right one, because the machine IS set up, and the cost
+      is asymmetric: a wrong 'update' never adds the cmem.ai stream (the Cowork state is
+      READ and kept, never reversed), takes the drive from where the clone actually
+      sits, and skips a confirmation in front of an idempotent run whose plan summary
+      still prints. A wrong 'first' is exactly today's behaviour.
+
+      ⚠ An earlier draft of this reasoning, sent to the macOS half and quoted in its
+      commit message, claimed the three together avoided a false positive that one
+      landmark gave. That was reasoned, not measured, and PENRIL falsifies it - all
+      three are present here too. Three conditions because a set-up machine has three
+      separate things, not because any of them was shown to discriminate better.
+
+      Pure, so -SelfTest drives every branch with no machine state at all.
+    #>
+    param([string] $Here, [string] $Workspace, [bool] $MemPresent, [bool] $McpRegistered)
+    if ((-not $Here) -or (-not $Workspace)) { return 'first' }
+    # The separator is what makes this a containment test and not a prefix test:
+    # without it WorkSpace2 passes, which is the lookalike the self-test pins.
+    $prefix = $Workspace.TrimEnd('\') + '\'
+    if ($Here.Length -le $prefix.Length) { return 'first' }
+    if (-not $Here.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return 'first' }
+    if (-not $MemPresent) { return 'first' }
+    if (-not $McpRegistered) { return 'first' }
+    return 'update'
+}
+
+function Test-GraphServersRegistered {
+    <#
+      Are BOTH graph MCP servers registered? Reads the file graph-servers/install.ps1
+      writes through `claude mcp add -s user`.
+
+      $Path and $Names are parameters so -SelfTest can feed fixtures - in particular the
+      half-install, a file naming ONE of the two, which is what a phase 4 that stopped
+      half way leaves behind and which must NOT read as registered.
+
+      ConvertFrom-Json rather than a .NET JSON reader, for the reason Test-PluginInstalled
+      gives: it tolerates the UTF-8 BOM other tools leave on these files.
+    #>
+    param([string] $Path, [string[]] $Names = @('code-review-graph', 'gitnexus'))
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try { $data = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { return $false }
+    $servers = $data.mcpServers
+    if (-not $servers) { return $false }
+    $have = @($servers.PSObject.Properties | ForEach-Object { $_.Name })
+    foreach ($n in $Names) {
+        if ($have -notcontains $n) { return $false }
+    }
+    return $true
+}
+
+function Test-UpdateRun {
+    <#
+      The three probes, kept out of Get-UpdateRunVerdict so the verdict stays pure.
+
+      Fails toward 'first' - toward ASKING - on anything it cannot read. A path with no
+      drive letter (a UNC share) makes Split-Path -Qualifier throw, and asking a question
+      that did not need asking costs a keypress; skipping one that did costs an answer
+      the person never gave.
+    #>
+    param([string] $Dir)
+    try { $workspace = (Split-Path -Qualifier $Dir) + '\WorkSpace' }
+    catch { return $false }
+    $mem = Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.claude-mem') -PathType Container
+    $mcp = Test-GraphServersRegistered (Join-Path $env:USERPROFILE '.claude.json')
+    return ((Get-UpdateRunVerdict $Dir $workspace $mem $mcp) -eq 'update')
 }
 
 function Get-WritableDrive {
@@ -1155,6 +1255,10 @@ $script:prevConsoleEncoding = $null
 # test that reads it is reading a variable, not relying on an unassigned one being
 # $null - which is the same answer right up until somebody adds Set-StrictMode.
 $script:coworkAsked = $false
+# Is this machine already set up, so that the three opening questions are skipped and the
+# run is an update? Set once, before the first of them. Declared here for the same reason
+# as the line above: a variable that is read is a variable that is declared.
+$script:updateRun = $false
 # Rows the gate decided to install as portable copies. Filled by the gate, consumed
 # AFTER the summary's go-ahead - see both sites.
 $script:portableRows = @()
@@ -2129,6 +2233,35 @@ function Invoke-SelfTest {
         Check 'order: every question is answered before the go-ahead' `
             (($qDrive -lt $qGo) -and ($qCowork -lt $qGo) -and ($qPortable -lt $qGo))
 
+        # ⛔ AND ALL THREE OF THOSE QUESTIONS MUST CONSULT THE UPDATE-RUN VERDICT (owner,
+        # 2026-11-03). Cutting any one of the three wirings fails OPEN - the question comes
+        # back and the run still works - so nothing else in this file would ever notice.
+        # Needles glued for the reason the block above gives, the printed sentences
+        # included: written plainly, this very block would be their first occurrence.
+        # ⚠ -gt 0 IS RESTATED ON BOTH SIDES OF EVERY ORDERING. A landmark that was not
+        # found is 0, and 0 -lt anything is TRUE, so a missing needle would otherwise read
+        # as a passing order check - measured on this file's reply-language wiring.
+        $qVerdict   = Find-SourceLine $meSrc ('$script:updateRun = ' + 'Test-UpdateRun')
+        $qUpdDrive  = Find-SourceLine $meSrc ('(-not $script:' + 'updateRun) -and')
+        $qUpdCowork = Find-SourceLine $meSrc ('$script:updateRun -and ($Cowork ' + "-eq 'ask')")
+        $qUpdGo     = Find-SourceLine $meSrc ('update run: this machine is already installed - ' + 'starting')
+        Check 'update run: control - all four wiring landmarks were found' `
+            (($qVerdict -gt 0) -and ($qUpdDrive -gt 0) -and ($qUpdCowork -gt 0) -and ($qUpdGo -gt 0))
+        Check 'update run: the verdict is decided before the drive question' `
+            (($qVerdict -gt 0) -and ($qDrive -gt 0) -and ($qVerdict -lt $qDrive))
+        Check 'update run: the drive question consults it' `
+            (($qUpdDrive -gt 0) -and ($qDrive -gt 0) -and ($qUpdDrive -lt $qDrive))
+        Check 'update run: the Cowork question consults it' `
+            (($qUpdCowork -gt 0) -and ($qCowork -gt 0) -and ($qUpdCowork -lt $qCowork))
+        Check 'update run: the Start? gate consults it' `
+            (($qUpdGo -gt 0) -and ($qGo -gt 0) -and ($qUpdGo -lt $qGo))
+        # The cloud plugin's state is READ in all three places it has to be: where an update
+        # run keeps the decision, where the claude-mem phase would otherwise reinstall a
+        # plugin that needs nothing, and in the -CheckOnly report, which must not promise a
+        # question this machine will not be asked. Counted, so losing any one is visible.
+        Check 'update run: the Cowork plugin state is read in all three places' `
+            ((& $countOf ('Test-PluginInstalled $script:settingsPath ' + "'claude-mem-cowork'")) -eq 3)
+
         # No prompt may count down any more: a timed question answers itself for somebody
         # who looked away. Both helpers keep $Seconds in their signature, so the thing to
         # look for is the countdown text, not the parameter.
@@ -2283,6 +2416,63 @@ function Invoke-SelfTest {
     # vanishes on the way to the PowerShell 7 child, a string does not.
     $cw = Get-ForwardArgs @{ Cowork = 'no' }
     Check 'cowork: -Cowork no survives the relaunch' (($cw.Count -eq 2) -and ($cw[0] -eq '-Cowork') -and ($cw[1] -eq 'no'))
+
+    # ----------- already set up? the three-condition update-run verdict (owner, 2026-11-03)
+    # The verdict is pure, so every branch is driven here with no machine state - including
+    # the two lookalikes that a plain prefix test would get wrong: the WorkSpace folder
+    # ITSELF, and a sibling whose name merely starts the same way.
+    Check 'update run: inside WorkSpace, claude-mem and graph servers present' `
+        ((Get-UpdateRunVerdict 'D:\WorkSpace\dev-workstation' 'D:\WorkSpace' $true $true) -eq 'update')
+    Check 'update run: no claude-mem is a first install' `
+        ((Get-UpdateRunVerdict 'D:\WorkSpace\dev-workstation' 'D:\WorkSpace' $false $true) -eq 'first')
+    Check 'update run: no graph servers is a first install' `
+        ((Get-UpdateRunVerdict 'D:\WorkSpace\dev-workstation' 'D:\WorkSpace' $true $false) -eq 'first')
+    Check 'update run: a clone outside WorkSpace is a first install' `
+        ((Get-UpdateRunVerdict 'D:\Downloads\dev-workstation' 'D:\WorkSpace' $true $true) -eq 'first')
+    Check 'update run: WorkSpace2 is NOT inside WorkSpace' `
+        ((Get-UpdateRunVerdict 'D:\WorkSpace2\dev-workstation' 'D:\WorkSpace' $true $true) -eq 'first')
+    Check 'update run: the WorkSpace folder itself is not inside it' `
+        ((Get-UpdateRunVerdict 'D:\WorkSpace' 'D:\WorkSpace' $true $true) -eq 'first')
+    # ⚠ AND THE SAME FOLDER WRITTEN WITH A TRAILING SEPARATOR, which is the only thing the
+    # length guard catches that the separator test does not. Added because the mutation
+    # that deletes that guard was NOT caught by the case above: without the trailing
+    # backslash, StartsWith already answers, and the two guards cover each other. One
+    # fixture apart, this is the §9 shape - a second guard hiding the one under test.
+    Check 'update run: WorkSpace written with a trailing separator is still not inside it' `
+        ((Get-UpdateRunVerdict 'D:\WorkSpace\' 'D:\WorkSpace' $true $true) -eq 'first')
+    Check 'update run: no WorkSpace at all is a first install' `
+        ((Get-UpdateRunVerdict 'D:\WorkSpace\dev-workstation' '' $true $true) -eq 'first')
+    # Windows only, so a differently-cased path is the SAME clone - the macOS half's
+    # equivalent case cannot be shared, which is why it is written out here.
+    Check 'update run: the containment test ignores case' `
+        ((Get-UpdateRunVerdict 'd:\workspace\dev-workstation' 'D:\WorkSpace' $true $true) -eq 'update')
+    Check 'update run: a trailing backslash is not a different folder' `
+        ((Get-UpdateRunVerdict 'D:\WorkSpace\dev-workstation' 'D:\WorkSpace\' $true $true) -eq 'update')
+
+    # The third condition reads a real file, so it gets real fixtures. THE ONE THAT MATTERS
+    # IS THE HALF-INSTALL: a phase 4 that stopped between the two `claude mcp add` calls
+    # leaves ONE of the names, and a machine in that state must be asked, not updated.
+    $mcpDir = Join-Path ([IO.Path]::GetTempPath()) ('ws-mcp-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $mcpDir -Force | Out-Null
+    try {
+        $mcpBoth = Join-Path $mcpDir 'both.json'
+        $mcpHalf = Join-Path $mcpDir 'half.json'
+        $mcpNone = Join-Path $mcpDir 'none.json'
+        $mcpBom  = Join-Path $mcpDir 'bom.json'
+        Set-Content -LiteralPath $mcpBoth -Encoding ASCII `
+            -Value '{"mcpServers":{"gitnexus":{},"code-review-graph":{},"other":{}}}'
+        Set-Content -LiteralPath $mcpHalf -Encoding ASCII -Value '{"mcpServers":{"gitnexus":{}}}'
+        Set-Content -LiteralPath $mcpNone -Encoding ASCII -Value '{"projects":{}}'
+        [IO.File]::WriteAllText($mcpBom, '{"mcpServers":{"gitnexus":{},"code-review-graph":{}}}',
+                                (New-Object Text.UTF8Encoding $true))
+        Check 'graph MCP: both registered reads registered'  (Test-GraphServersRegistered $mcpBoth)
+        Check 'graph MCP: only ONE of the two is not registered' (-not (Test-GraphServersRegistered $mcpHalf))
+        Check 'graph MCP: no mcpServers key at all is not registered' (-not (Test-GraphServersRegistered $mcpNone))
+        Check 'graph MCP: a UTF-8 BOM does not hide a registration' (Test-GraphServersRegistered $mcpBom)
+        Check 'graph MCP: a file that is not there is not registered' `
+            (-not (Test-GraphServersRegistered (Join-Path $mcpDir 'no-such.json')))
+    }
+    finally { Remove-Item -LiteralPath $mcpDir -Recurse -Force -ErrorAction SilentlyContinue }
 
     # THE TWO ROWS THAT DO NOT RESOLVE THROUGH PATH OR THROUGH GitHub.
     $vscodeDep = $DEPS | Where-Object { $_.Name -eq 'vscode' }
@@ -3241,10 +3431,36 @@ if (-not $resolved.Root) {
     Stop-Run 1
 }
 $defaultLetter = $resolved.Root.Substring(0, 1)
+
+# ------------------------------------------- already set up? then this run is an update
+# Decided ONCE, here, because all three questions below consult it. The PowerShell 7 child
+# re-runs this same detection from the top of the file and reaches the same answer, so the
+# verdict does not need forwarding across the handover - unlike the ANSWERS, which do.
+$script:updateRun = Test-UpdateRun $here
+
+# ⭐ ON AN UPDATE RUN THE DRIVE IS NOT A CHOICE, IT IS A FACT: the clone is already sitting
+# in the WorkSpace the question is about. Read it off $here, because Resolve-WorkspaceRoot
+# with no letter falls back to C - which would print C:\WorkSpace underneath a run whose
+# clone is on D. If that letter will not resolve after all, stand down from the whole
+# verdict rather than carry on with a root nobody chose: the questions get asked.
+if ($script:updateRun -and (-not $Drive)) {
+    $ownLetter = $here.Substring(0, 1).ToUpperInvariant()
+    $fromClone = Resolve-WorkspaceRoot -Letter $ownLetter -Candidates $driveCandidates
+    if ($fromClone.Root) { $Drive = $ownLetter; $resolved = $fromClone }
+    else { $script:updateRun = $false }
+}
+
 # Asked only when nobody has answered and there is more than one answer to give. One
 # writable drive is not a choice, and -CheckOnly writes nothing so it may not create
 # anything either - both take the default and say so.
-if ((-not $Drive) -and (-not $CheckOnly) -and (@($driveCandidates).Count -gt 1)) {
+#
+# ⛔ AND NOT ON AN UPDATE RUN, which NARROWS an owner ruling rather than quietly dropping
+# it. 2026-10-21 they asked for this question on an in-clone run too, not only on a
+# lone-file bootstrap, and that still holds for every machine this installer has not set
+# up. On one it HAS, the question has a single possible answer, and the later instruction
+# (2026-11-03, which names this very question among the ones to stop asking) decides it.
+if ((-not $Drive) -and (-not $CheckOnly) -and (-not $script:updateRun) -and
+    (@($driveCandidates).Count -gt 1)) {
     $Drive = Read-DriveChoice -Candidates $driveCandidates -Default $defaultLetter
     $resolved = Resolve-WorkspaceRoot -Letter $Drive -Candidates $driveCandidates
 }
@@ -3255,6 +3471,24 @@ $WORKSPACE_ROOT = $resolved.Root
 # question raised forty minutes in, behind a third-party installer's output, is a
 # question nobody is still sitting there to answer.
 #
+# ⭐ AN UPDATE RUN ASKS NOTHING AND REVERSES NOTHING. It READS the Cowork decision this
+# machine already carries and keeps it, so a re-run can never quietly start streaming tool
+# use to cmem.ai, and can never quietly stop. -Cowork yes/no still overrides, and is tested
+# first because it is an answer the person actually gave.
+#
+# The two sentences below are word for word the ones install.sh prints (bf8283b), agreed
+# with the macOS half so that one owner reading two machines reads the same line twice.
+if ($script:updateRun -and ($Cowork -eq 'ask') -and -not $CheckOnly) {
+    $coworkHere = Test-PluginInstalled $script:settingsPath 'claude-mem-cowork' `
+                      (Join-Path 'thedotmack' 'claude-mem-cowork')
+    $Cowork = $(if ($coworkHere) { 'yes' } else { 'no' })
+    Write-Host ""
+    Write-Host "update run: this machine is already installed - nothing is asked" -ForegroundColor Cyan
+    Write-Host ("  WorkSpace: {0} - this clone is already inside it" -f $WORKSPACE_ROOT)
+    Write-Host ("  claude-mem Cowork: {0} - left as it is (-Cowork yes|no to change it)" -f `
+                $(if ($coworkHere) { 'installed' } else { 'not installed' }))
+}
+
 # Printed only when there is actually something to ask. Given -Cowork explicitly
 # there is nothing to decide, and the PowerShell 7 child is always given it
 # explicitly - which is what stops this block running twice in one run.
@@ -3500,7 +3734,16 @@ if (-not $CheckOnly) {
     Write-Host "   From here it runs to the end without asking anything else."
     Write-Host ""
 
-    if ([Console]::IsInputRedirected) {
+    if ($script:updateRun) {
+        # ⛔ THE SUMMARY ABOVE STILL PRINTS, and that is the whole of what this branch
+        # gives up. The gate exists to put the plan in front of somebody BEFORE their
+        # machine is changed for the first time; on a machine that is already set up the
+        # change is an update they asked for by typing the command, and the owner has
+        # ruled (2026-11-03) that it must not be asked. They can still read what it is
+        # about to do, which is what the gate was protecting.
+        Write-Host "   update run: this machine is already installed - starting without asking." -ForegroundColor Cyan
+    }
+    elseif ([Console]::IsInputRedirected) {
         Write-Host "   stdin is not a terminal, so there is nobody to confirm: starting." -ForegroundColor Yellow
     }
     else {
@@ -3734,9 +3977,17 @@ if (-not (Test-IsClone $here)) {
 # Said AFTER the handover, so one run says it once: the 5.1 half exits above, and
 # the PowerShell 7 half is the one that gets here. Skipped when the question was
 # just asked, which already printed the answer.
+#
+# ⚠ AND IT MUST NOT CLAIM THE PERSON PASSED A FLAG THEY DID NOT. On an update run the
+# answer came from reading this machine, not from the command line, and the child cannot
+# tell the two apart by looking at its own parameters - the parent forwards the resolved
+# value either way. It re-runs the detection instead, which is why $script:updateRun is
+# readable here at all.
 if ($Cowork -ne 'ask' -and -not $script:coworkAsked) {
+    $coworkFrom = $(if ($script:updateRun) { 'update run - left as it was' }
+                    else { "from -Cowork $Cowork" })
     Write-Host ""
-    Write-Host "claude-mem Cowork: $Cowork (from -Cowork $Cowork)" -ForegroundColor Cyan
+    Write-Host "claude-mem Cowork: $Cowork ($coworkFrom)" -ForegroundColor Cyan
 }
 
 # ------------------------------------------------------------ phase 2: the toolchain
@@ -4063,10 +4314,23 @@ if ($CheckOnly) {
                 Write-Host "     claude plugin install claude-mem-cowork@thedotmack" }
         'no'  { Write-Host "   -Cowork no: the cloud plugin would NOT be installed." -ForegroundColor Green }
         default {
-                Write-Host "   claude-mem Cowork: a real run would ASK, once, before installing" -ForegroundColor Yellow
-                Write-Host "   anything - 30 seconds, and no answer means no. It streams tool use"
-                Write-Host "   to cmem.ai, so it is never installed without a decision."
-                Write-Host "   -Cowork yes / -Cowork no answers it up front and skips the question." }
+                # ⛔ AND IT MUST NOT PROMISE A QUESTION THIS MACHINE WILL NOT BE ASKED.
+                # -CheckOnly leaves $Cowork at 'ask' whatever the machine looks like, so
+                # before this branch split, a set-up machine was told "a real run would
+                # ASK" when a real run would read the answer off disk and say nothing.
+                # Measured here on 2026-11-03, in the -CheckOnly log of this very change.
+                if ($script:updateRun) {
+                    Write-Host "   claude-mem Cowork: a real run would NOT ask - this machine is" -ForegroundColor Cyan
+                    Write-Host "   already installed, so it reads the decision and keeps it. Right now"
+                    Write-Host ("   that reads: {0}." -f $(if (Test-PluginInstalled $script:settingsPath 'claude-mem-cowork' (Join-Path 'thedotmack' 'claude-mem-cowork')) { 'installed' } else { 'not installed' }))
+                    Write-Host "   -Cowork yes / -Cowork no is how you change it."
+                }
+                else {
+                    Write-Host "   claude-mem Cowork: a real run would ASK, once, before installing" -ForegroundColor Yellow
+                    Write-Host "   anything - and it WAITS for the answer rather than counting down."
+                    Write-Host "   It streams tool use to cmem.ai, so it is never installed without a"
+                    Write-Host "   decision. -Cowork yes / -Cowork no answers it up front."
+                } }
     }
     Write-Host "   The first of those MAY ask a question in a real terminal (cloud tier vs"
     Write-Host "   local); the real run explains it before starting. Answer: local."
@@ -4240,7 +4504,18 @@ else {
 # The CLOUD half, and the only thing in this script that is not installed by
 # default. The answer was settled at the top of the run, before anything was
 # installed; nothing here asks.
-if ($Cowork -eq 'yes') {
+#
+# ⛔ AND IT DOES NOT REINSTALL ONE THAT IS ALREADY THERE. Found by the macOS half while
+# building the same change (M1, 2026-11-03): an update run that reads Cowork as installed
+# sets -Cowork yes, which before this guard sent `claude plugin install` at a plugin that
+# needed nothing - every single update, for ever. Test-PluginInstalled wants BOTH halves,
+# the enabledPlugins key and a version directory in the cache, so a half-install still
+# installs.
+if (($Cowork -eq 'yes') -and
+    (Test-PluginInstalled $script:settingsPath 'claude-mem-cowork' (Join-Path 'thedotmack' 'claude-mem-cowork'))) {
+    Write-Host "   Cowork: yes - claude-mem-cowork@thedotmack already installed - left alone" -ForegroundColor Green
+}
+elseif ($Cowork -eq 'yes') {
     Write-Host "   Cowork: yes - installing the cloud plugin" -ForegroundColor Yellow
     & claude plugin install claude-mem-cowork@thedotmack 2>&1 |
         Select-Object -Last 3 | ForEach-Object { Write-Host "   $_" }

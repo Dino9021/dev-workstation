@@ -61,6 +61,11 @@ curl -fsSLo /tmp/install.sh https://raw.githubusercontent.com/Dino9021/dev-works
   (`~/.local`), VS Code into `/Applications`.
 - 只看不裝 / report only: `sh install.sh --check-only`　·　不互動 / unattended:
   `sh install.sh --cowork no`
+- 已經裝過的機器再跑一次就是更新，什麼都不問：Cowork 維持原狀（要改用 `--cowork yes|no`）。
+  判定是三項都成立：這份 clone 在 `~/WorkSpace` 裡、claude-mem 已安裝、兩個圖譜伺服器已註冊。/
+  On an installed machine a re-run is an update and asks nothing; Cowork stays as it is
+  (`--cowork yes|no` changes it). Installed means all three: this clone is inside
+  `~/WorkSpace`, claude-mem is installed, both graph servers are registered.
 - 會裝 Homebrew（GitNexus 需要它的 `openssl@3`），這一步要輸入一次管理員密碼，所以要在
   「終端機」裡執行；沒有管理員權限的帳號會跳過它並說明原因。/ It installs Homebrew (GitNexus
   needs its `openssl@3`), which asks for the administrator password once — so run it from
@@ -257,6 +262,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # 真的安�
 ```
 
 用 Windows PowerShell 5.1 直接跑就好。腳本會自己安裝 PowerShell 7，再把工作交棒過去。
+
+⭐ **已經裝過的機器再跑一次就是更新，開頭三個問題一個都不問**（磁碟機、claude-mem Cowork、
+Start?）。Cowork 維持原狀——裝了就留著，沒裝就不會替你裝；要改用 `-Cowork yes` 或 `-Cowork no`。
+判定是三項都成立：這份 clone 在某顆磁碟根目錄的 `WorkSpace` 裡面、claude-mem 已安裝、兩個圖譜
+伺服器都已註冊。任何一項不成立就照舊一一詢問。**計畫摘要還是會印出來**，只是不再等你按 Y。
+macOS 的 `install.sh` 用同一套判定，兩邊行為一致。
 
 ### 安裝順序
 
@@ -740,6 +751,15 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1              # do it
 
 Run it from Windows PowerShell 5.1. The script installs PowerShell 7 itself and hands over
 to it.
+
+⭐ **On a machine that is already installed, a re-run is an update and asks none of the
+three opening questions** (the drive, claude-mem Cowork, Start?). Cowork stays exactly as it
+is — installed stays installed, absent stays absent; `-Cowork yes` or `-Cowork no` changes
+it. Installed means all three: this clone sits inside a `WorkSpace` folder at the root of
+its drive, claude-mem is installed, and both graph servers are registered. If any one of
+them is false, every question is asked as before. **The plan summary still prints** — it
+just no longer waits for a Y. The macOS `install.sh` uses the same three, so both behave
+alike.
 
 ### The order it installs in
 

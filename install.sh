@@ -512,6 +512,13 @@ self_test() {
     t 'update: uncommitted tracked changes block the pull' "$(update_verdict /w/dw /w/dw ' M install.sh' | grep -q 'uncommitted'; echo $?)"
     t 'update: a trailing slash is not a different directory' "$(is "$(update_verdict /w/dw/ /w/dw '')" '')"
 
+    t 'update run: inside WorkSpace, claude-mem and graph servers present' "$(is "$(update_run_verdict /h/WorkSpace/dw /h/WorkSpace yes yes)" update)"
+    t 'update run: no claude-mem is a first install' "$(is "$(update_run_verdict /h/WorkSpace/dw /h/WorkSpace no yes)" first)"
+    t 'update run: no graph servers is a first install' "$(is "$(update_run_verdict /h/WorkSpace/dw /h/WorkSpace yes no)" first)"
+    t 'update run: a clone outside WorkSpace is a first install' "$(is "$(update_run_verdict /h/Downloads/dw /h/WorkSpace yes yes)" first)"
+    t 'update run: a sibling named WorkSpace2 is not inside WorkSpace' "$(is "$(update_run_verdict /h/WorkSpace2/dw /h/WorkSpace yes yes)" first)"
+    t 'update run: no WorkSpace folder is a first install' "$(is "$(update_run_verdict /h/WorkSpace/dw '' yes yes)" first)"
+
     st=$(mktemp -d "${TMPDIR:-/tmp}/install-selftest.XXXXXX")
     printf 'export FOO=1\n' >"$st/zp"
     ensure_profile "$st/zp" >/dev/null; ensure_profile "$st/zp" >/dev/null
@@ -614,10 +621,39 @@ self_update() {
     fi
 }
 
+# update_run_verdict HERE WORKSPACE MEM MCP -> update | first
+# An update run (owner, 2026-11-03: an installed machine is not asked the opening questions)
+# is one where ALL three hold - agreed with W1 so both installers decide alike: this clone
+# sits inside WorkSpace, claude-mem is installed, both graph servers are registered. It
+# detects "this workstation is set up", not "this installer ran here": W1 measured all three
+# present on a machine where install.ps1 had only ever run -CheckOnly. Being wrong is cheap
+# either way - an update run keeps the Cowork decision, a first-install verdict just asks.
+update_run_verdict() {
+    [ -n "$2" ] || { echo first; return; }
+    case "$1/" in "$2"/?*) ;; *) echo first; return ;; esac
+    if [ "$3" = yes ] && [ "$4" = yes ]; then echo update; else echo first; fi
+}
+
+update_run() {
+    ws=$(cd "$HOME/WorkSpace" 2>/dev/null && pwd -P) || ws=''
+    mem=no; [ -d "$HOME/.claude-mem" ] && mem=yes
+    mcp=no
+    /usr/bin/jq -e '(.mcpServers // {}) | has("code-review-graph") and has("gitnexus")' "$HOME/.claude.json" >/dev/null 2>&1 && mcp=yes
+    [ "$(update_run_verdict "$(cd "$here" && pwd -P)" "$ws" "$mem" "$mcp")" = update ]
+}
+
 ask_cowork() {
     # claude-mem Cowork streams tool use to cmem.ai, so it is never installed without a
     # decision. Asked once, here, before anything is installed. No terminal = no.
+    # An update run asks nothing: it keeps the decision already made, never reverses it.
     [ -n "$cowork" ] && return 0
+    if update_run; then
+        if plugin_installed claude-mem-cowork thedotmack; then cowork=yes; else cowork=no; fi
+        say ''
+        say 'update run: this machine is already installed - nothing is asked'
+        say "  claude-mem Cowork: $([ $cowork = yes ] && echo installed || echo 'not installed') - left as it is (--cowork yes|no to change it)"
+        return 0
+    fi
     if [ ! -t 0 ]; then cowork=no; return 0; fi
     say ''
     say 'claude-mem Cowork is the CLOUD half of claude-mem: its hooks stream tool use to cmem.ai.'
@@ -685,7 +721,9 @@ claude_mem() {
             npx -y claude-mem start 2>&1 | tail -n 2 | sed 's/^/    /' ;;
     esac
     claude plugin marketplace add thedotmack/claude-mem 2>&1 | tail -n 3 | sed 's/^/    /'
-    if [ "$cowork" = yes ]; then
+    if [ "$cowork" = yes ] && plugin_installed claude-mem-cowork thedotmack; then
+        say '  Cowork: yes - claude-mem-cowork@thedotmack already installed - left alone'
+    elif [ "$cowork" = yes ]; then
         say '  Cowork: yes - installing the cloud plugin'
         claude plugin install claude-mem-cowork@thedotmack 2>&1 | tail -n 3 | sed 's/^/    /'
     else
