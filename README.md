@@ -99,7 +99,7 @@ curl -fsSLo /tmp/install.sh https://raw.githubusercontent.com/Dino9021/dev-works
 
 | 資料夾 | 裝什麼 |
 |---|---|
-| [`graph-servers/`](graph-servers/) | 兩台程式圖譜 MCP 伺服器：**GitNexus** 與 **code-review-graph**。含自動更新索引的 refresh hook、每次 commit 後觸發的 post-commit hook，以及第一次建索引與背景監看服務 |
+| [`graph-servers/`](graph-servers/) | 兩台程式圖譜 MCP 伺服器：**GitNexus** 與 **code-review-graph**。含自動更新索引的 refresh hook、每次 commit 後觸發的 post-commit hook，以及第一次建索引與背景監看服務。<br>⚠ **Graphify 評估過，不納入**：取代不了這兩台，照它預設方式安裝還會改寫 `CLAUDE.md`、加 hook、和這裡的 post-commit 互相抵銷——理由與衝突清單見 [`graph-servers/GRAPHIFY-EVALUATION.md`](graph-servers/GRAPHIFY-EVALUATION.md) |
 | [`claude-mem/`](claude-mem/) | **claude-mem**，跨 session 的記憶。預設就裝。腳本化安裝需要三條指令，其中一條幾乎所有人都會漏掉；也說明它跟專案自己的 `Memory/` 資料夾要怎麼區分 |
 | [`general-claude-md/`](general-claude-md/) | 三份給 AI 代理讀的指令檔：`user-CLAUDE.md` 放到 `~/.claude/CLAUDE.md`（整台機器每個專案都載入）、`VERIFICATION-LESSONS.md` 放到 `~/.claude/docs/`、`project-CLAUDE.md` 是每個專案自己的 `CLAUDE.md` 範本 |
 | [`parallel-agent-operations/`](parallel-agent-operations/) | 一段可貼進 `CLAUDE.md` 的規則，阻止 AI 代理自作主張一次派出幾十個子代理——它看不到自己會燒掉多少額度 |
@@ -551,7 +551,7 @@ from now, on another machine, it still installs."
 
 | Folder | Sets up |
 |---|---|
-| [`graph-servers/`](graph-servers/) | Two code-graph MCP servers — **GitNexus** and **code-review-graph** — with the refresh hook that keeps their indexes current, the post-commit hook that triggers it, the first index and the watch daemon |
+| [`graph-servers/`](graph-servers/) | Two code-graph MCP servers — **GitNexus** and **code-review-graph** — with the refresh hook that keeps their indexes current, the post-commit hook that triggers it, the first index and the watch daemon.<br>⚠ **Graphify was evaluated and is not included**: it replaces neither server, and its default install rewrites `CLAUDE.md`, adds hooks, and cancels out the post-commit here — reasons and the conflict list in [`graph-servers/GRAPHIFY-EVALUATION.md`](graph-servers/GRAPHIFY-EVALUATION.md) |
 | [`claude-mem/`](claude-mem/) | **claude-mem**, cross-session memory, installed by default. The three commands a scripted install needs, one of which nearly everybody leaves out, and how to keep it from being confused with a project's own `Memory/` folder |
 | [`general-claude-md/`](general-claude-md/) | Three instruction files for an AI agent: `user-CLAUDE.md` goes to `~/.claude/CLAUDE.md` (loaded in every project on the machine), `VERIFICATION-LESSONS.md` to `~/.claude/docs/`, and `project-CLAUDE.md` is the template for each project's own `CLAUDE.md` |
 | [`parallel-agent-operations/`](parallel-agent-operations/) | A `CLAUDE.md` rule that stops an agent fanning out into dozens of subagents on its own — it cannot see the session budget it would burn |
