@@ -130,6 +130,76 @@ A fix not in the trunk is invisibly absent from every other branch's build.
 - External model runs: capture prompt, log, and output verbatim into the task folder; the
   verdict goes in the progress record, never into the output file.
 
+## Codex CLI — test first, then use it
+
+The owner has made the OpenAI Codex CLI available as a second model, on the owner's own
+ChatGPT account and quota. Typical uses: an independent ADR review round, a second check
+of a finding, image generation. What to use it for is your call.
+
+**The test.** It is usable when both succeed: `codex --version < /dev/null` prints a
+version, and `codex login status < /dev/null` says logged in. Windows: `codex` is on
+`PATH`. macOS: it ships inside the VS Code extension and its path changes on every update,
+so look it up each time —
+`C=$(ls -d ~/.vscode/extensions/openai.chatgpt-*-darwin-arm64 | sort -V | tail -1)/bin/macos-aarch64/codex`.
+
+**The loop — never stop work for it, and never install it or log it in yourself:**
+1. The first time you need it, run the test.
+2. Passes → remember that it works and use it directly from then on, without testing
+   again.
+3. Fails, or a call fails while in use → tell the owner in one line that it is
+   unavailable and why, ask whether to keep trying it later, and carry on without it.
+4. With no answer, or an answer to keep trying → the next time you need it, go back to
+   step 1.
+5. The owner says to stop using it → do not test or use it until the owner says it is
+   usable again; then go back to step 1.
+
+**Invoke it one-shot, in the foreground — write the prompt to a UTF-8 file in the task
+folder and feed it on stdin:**
+`codex exec --skip-git-repo-check -s read-only -C <work dir> -o <task folder>/codex-NN-out.md - < <task folder>/codex-NN-prompt.md > <task folder>/codex-NN-log.txt 2>&1`
+The `-` reads the prompt from stdin, which also closes stdin and needs no quoting. A short
+prompt may go as an argument instead, then with stdin closed: `"<prompt>" < /dev/null`
+(PowerShell: `$null | codex exec ...`).
+
+Pitfalls already paid for — do not pay for them again:
+- ⛔ **stdin left open hangs it for ever** on "Reading additional input from stdin..."
+  (measured: a 10-minute wait). The file-on-stdin form above cannot hit this.
+- ⛔ **Pass the working directory as `-C <dir>`, never by a `cd` before it** — a failed
+  `cd` (an unset variable) silently ran it in the wrong directory.
+- **`-o` holds ONLY the final reply**, with no trailing newline. The header (model,
+  sandbox, `approval: never`, `session id`), the reply and `tokens used` go to stdout and
+  stderr — which is why the log redirect above is not optional. Full sessions are stored
+  under `~/.codex/sessions/`.
+- **Each call costs thousands of tokens of overhead** (measured 6.8k–19k for a one-line
+  prompt: its own system prompt and skills). Batch questions into one call rather than
+  many tiny ones; it is the owner's quota.
+- CJK in the prompt and the reply arrives intact when the prompt file is UTF-8 (checked
+  by codepoint). A long prompt as an argument on Windows is UNTESTED — use the file.
+- A large job may outlast the shell tool's default timeout: set the tool's timeout up
+  front. Real ADR-sized durations are not yet measured.
+- `-s workspace-write` only when it must write, and then only into the task folder.
+  Whether `read-only` blocks reads, or `workspace-write` can escape the folder, is not yet
+  measured — check what it touched with `git status`.
+
+**Continue a conversation:** the header prints `session id: <UUID>`;
+`cd <work dir> && codex exec resume --skip-git-repo-check <UUID> -o <out> - < <next prompt file> > <log> 2>&1`
+continues it, and it remembers the earlier rounds. Record each UUID and its purpose in the
+task's progress record.
+- ⛔ **`resume` accepts neither `-C` nor `-s`, and does NOT keep the first call's `-C`** —
+  measured: it ran in the caller's current directory. So the `cd` is unavoidable here,
+  and it must be chained with `&&` so a failed `cd` stops the call instead of running it
+  in the wrong place. A resume of a `read-only` session reported `sandbox: read-only`;
+  whether that is inherited or the default is not measured.
+
+**Rules for what you hand it:**
+- It does not read `CLAUDE.md` and knows nothing of the project: the prompt stands alone —
+  files to read, the task, the criteria, where to write the result.
+- It never commits, pushes, or writes outside the task folder; you apply and commit changes.
+- Never send it keys, passwords, the owner's personal data, or content the owner has not
+  cleared for an external service.
+- Capture per the external-model bullet in "How work is run" above.
+- Its claims are a peer's claims: re-run a load-bearing "found / not found" yourself.
+- When it is one round of an ADR review, the ADR says that round was Codex's.
+
 ## ADR before code
 
 A change that introduces, changes, or overturns a durable architectural judgement gets an
