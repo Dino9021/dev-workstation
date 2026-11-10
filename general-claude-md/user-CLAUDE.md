@@ -152,6 +152,15 @@ so look it up each time —
    step 1.
 5. The owner says to stop using it → do not test or use it until the owner says it is
    usable again; then go back to step 1.
+6. **The usage limit is the exception to step 3: do not ask.** Note the reset time in the
+   task's progress record, carry on without it, and use it again once that time has
+   passed. Every call writes the account's usage into its session log, so it is readable
+   after any call, not only after a refusal:
+   `grep -o '"rate_limits":{[^}]*}[^}]*}[^}]*}' "$(ls -t ~/.codex/sessions/*/*/*/rollout-*.jsonl | head -1)" | tail -1`
+   `primary` is the 5-hour window and `secondary` the weekly one: `used_percent`, and
+   `resets_at` in epoch seconds (`date -d @N` on Windows Git Bash, `date -r N` on macOS).
+   `used_percent` at 100 means the window is spent. What the error itself says when a
+   call is refused is not yet measured.
 
 **Invoke it one-shot, in the foreground — write the prompt to a UTF-8 file in the task
 folder and feed it on stdin:**
