@@ -152,6 +152,16 @@ of a finding, image generation. What to use it for is your call.
   - `UNAVAILABLE`: when the reason is probe-failed, use Codex anyway. Otherwise use the
     loop below.
   - `OFF`: the owner switched it off; do not use it.
+- **The word is the MAIN limit's only.** Every other Codex limit (images, for example) is
+  appended to the same line as `| limit <label>: <WORD> ... - <action>`, or as a `limits`
+  entry with `main: false` in `--json`. For a call that uses that limit, follow its action.
+  It is never refused by the gate and never asks the owner, so the duty to wait is yours.
+- **An image call refused with `usageLimitExceeded` names a `limitId` and a `resetsAt`.**
+  That limitId is the image limit, even when the verdict line does not list it. Treat it
+  as WAIT for images only:
+  - do not ask the owner;
+  - note the limitId and the reset time in the progress record;
+  - keep using Codex for text, and retry images after that time.
 - A line starting `TELL THE OWNER:` is said to the owner once.
   `(already told on this machine - say nothing)` means say nothing.
 - The words and the gate are documented in dispatch-guard `PROTOCOL.md`,
