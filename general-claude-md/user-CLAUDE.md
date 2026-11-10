@@ -136,13 +136,39 @@ The owner has made the OpenAI Codex CLI available as a second model, on the owne
 ChatGPT account and quota. Typical uses: an independent ADR review round, a second check
 of a finding, image generation. What to use it for is your call.
 
-**The test.** It is usable when both succeed: `codex --version < /dev/null` prints a
-version, and `codex login status < /dev/null` says logged in. Windows: `codex` is on
-`PATH`. macOS: it ships inside the VS Code extension and its path changes on every update,
-so look it up each time —
-`C=$(ls -d ~/.vscode/extensions/openai.chatgpt-*-darwin-arm64 | sort -V | tail -1)/bin/macos-aarch64/codex`.
+**Before calling it, ask dispatch-guard for the Codex verdict:**
+`bash ~/.claude/dispatch-guard/run.sh usage.py --codex-verdict` (`--json` for a program).
+- ⛔ **Trust the answer ONLY when its first line starts with `Codex:`.** With `--json`,
+  the object must have `word` and `notice` keys. An older plugin ignores the flag and
+  prints the CLAUDE usage verdict, whose exit codes overlap (0 is GO in both; 2 is STOP
+  there and WAIT here). This is measured: after a plugin update, it keeps happening until
+  the sessions restart. Any other answer, including rc 127, means there is no verdict, so
+  use the loop below.
+- Act on the word, which the line spells out:
+  - `GO`: use it.
+  - `PACE`: use it for small calls only.
+  - `WAIT <time>`: do not ask the owner; note the time in the progress record, carry on,
+    and use it again after that time.
+  - `UNAVAILABLE`: when the reason is probe-failed, use Codex anyway. Otherwise use the
+    loop below.
+  - `OFF`: the owner switched it off; do not use it.
+- A line starting `TELL THE OWNER:` is said to the owner once.
+  `(already told on this machine - say nothing)` means say nothing.
+- The words and the gate are documented in dispatch-guard `PROTOCOL.md`,
+  `## 8. Codex verdict`. The gate refuses Codex calls on WAIT and OFF, and refuses
+  spending the free reset credits; those are the owner's.
 
-**The loop — never stop work for it, and never install it or log it in yourself:**
+**The test (no verdict available).** It is usable when both succeed:
+`codex --version < /dev/null` prints a version, and `codex login status < /dev/null` says
+logged in. Windows: `codex` is on `PATH`. macOS: it ships inside the VS Code extension and
+its path changes on every update. So look it up each time, and write the path into the
+command itself, so that dispatch-guard's gate sees a codex call
+(`$C exec` is invisible to it):
+`"$(ls -d ~/.vscode/extensions/openai.chatgpt-*-darwin-arm64 | sort -V | tail -1)/bin/macos-aarch64/codex" exec ...`
+With the extension absent, this fails loudly with rc 127, which means not installed.
+
+**The loop (no verdict available) — never stop work for it, and never install it or log
+it in yourself:**
 1. The first time you need it, run the test.
 2. Passes → remember that it works and use it directly from then on, without testing
    again.
