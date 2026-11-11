@@ -152,11 +152,16 @@ of a finding, image generation. What to use it for is your call.
   - `UNAVAILABLE`: when the reason is probe-failed, use Codex anyway. Otherwise use the
     loop below.
   - `OFF`: the owner switched it off; do not use it.
-- **The word is the MAIN limit's only.** Image generation is charged to the main limit.
-  Any other limit the server lists is appended to the same line as
+- **The word is the MAIN limit's only.** Any other limit is appended to the same line as
   `| limit <label>: <WORD> ... - <action>`, or appears as a `limits` entry with
   `main: false` in `--json`. For a call that uses that limit, follow its action. The gate
   never refuses such a limit and never asks the owner, so waiting for it is your duty.
+- **Image generation has its own limit, which the server's usage read does not list.**
+  From dispatch-guard 0.76.3 it appears on the verdict line as
+  `| limit image generation: WAIT until <time>`. An image call refused with
+  `image generation failed: http 429 ... usage_limit_reached` (it carries `resets_at`) is
+  WAIT for images only: note its `resets_at`, keep using Codex for text, retry images
+  after that time, and do not ask the owner.
 - **A call refused with `usageLimitExceeded`, `limitId: premium` and "Your workspace is out
   of credits" means the MAIN limit is spent.** It fell over to workspace credits. This is
   not a separate quota:
