@@ -127,8 +127,11 @@ A fix not in the trunk is invisibly absent from every other branch's build.
   made to the installed copy is silently overwritten by the next update.
 - Before a dispatch wave, get the usage verdict (the plugin's `usage.py --verdict`) and act
   on the word GO/PACE/STOP — never on raw percentages.
-- External model runs: capture prompt, log, and output verbatim into the task folder; the
-  verdict goes in the progress record, never into the output file.
+- External model runs: capture prompt, log, and output verbatim into the task folder while
+  the run is in progress; the verdict goes in the progress record, never into the output
+  file. The log exists only to show progress if the run is cut off: once the result is
+  recorded in the report or progress record — with anything only the log holds, such as
+  the session id — delete the log. Keep the prompt and the final output.
 
 ## Codex CLI — test first, then use it
 
@@ -221,8 +224,9 @@ Pitfalls already paid for — do not pay for them again:
   `cd` (an unset variable) silently ran it in the wrong directory.
 - **`-o` holds ONLY the final reply**, with no trailing newline. The header (model,
   sandbox, `approval: never`, `session id`), the reply and `tokens used` go to stdout and
-  stderr — which is why the log redirect above is not optional. Full sessions are stored
-  under `~/.codex/sessions/`.
+  stderr — which is why the log redirect above is not optional while it runs. Once the
+  result is recorded, delete the log (the external-model bullet in "How work is run").
+  Full sessions are stored under `~/.codex/sessions/`.
 - **Each call costs thousands of tokens of overhead** (measured 6.8k–19k for a one-line
   prompt: its own system prompt and skills). Batch questions into one call rather than
   many tiny ones; it is the owner's quota.
