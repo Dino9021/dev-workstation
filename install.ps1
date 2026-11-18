@@ -4553,25 +4553,18 @@ elseif ($memState -eq 'stopped') {
     & npx --yes claude-mem start 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "   $_" }
 }
 else {
-    # TELL THE PERSON BEFORE IT HAPPENS. This is the one step that hands control to
-    # a third-party installer which MAY go interactive, and a prompt nobody was
-    # warned about looks like a hang. What is NOT known: whether it actually
-    # prompts when stdin is a real terminal. Every measurement here was taken with
-    # stdin non-interactive, where it never asks - so this warns rather than
-    # claims.
-    Write-Host "   claude-mem is not installed here. Installing it now." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "   Its installer MAY ASK YOU A QUESTION when run from a real terminal - it" -ForegroundColor Yellow
-    Write-Host "   offers a screen comparing its paid cloud tier against local-only mode." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "   If it asks: choose the LOCAL / no-cloud option. That is what the flags" -ForegroundColor Yellow
-    Write-Host "   below already select, so answering that way matches what this script wants:" -ForegroundColor Yellow
+    # ⛔ ITS STDIN IS CLOSED ON PURPOSE (`$null |` below). From a real terminal the
+    # installer goes interactive - a cloud-tier vs local-only screen - and the
+    # `Select-Object -Last 6` that trims its output also swallows that screen, so the
+    # run sits waiting for an answer to a question nobody can see. Reported by the
+    # owner 2026-11-18. Measured in a real console window: a child inherits
+    # stdin.isTTY = true; with `$null |` it sees undefined, which is the
+    # non-interactive path every earlier measurement took (it never asks there).
+    Write-Host "   claude-mem is not installed here. Installing it now (no questions asked)." -ForegroundColor Yellow
     Write-Host "     --provider claude   use your logged-in Claude account, process locally"
     Write-Host "     --runtime worker    the small local worker, NOT the Docker server runtime"
-    Write-Host ""
     Write-Host "   No account is required and nothing is uploaded; the data stays in"
-    Write-Host "   ~/.claude-mem on this machine. Run unattended (stdin not a terminal) it"
-    Write-Host "   does not ask at all - it takes the scripted path by itself."
+    Write-Host "   ~/.claude-mem on this machine."
     Write-Host ""
 
     # --provider claude is REQUIRED here, not preferred: with stdin non-interactive
@@ -4582,7 +4575,7 @@ else {
     # question either. It matters more than it looks: the `server` runtime brings
     # up Docker with postgres and redis, which is emphatically not what this script
     # is offering to do to somebody's machine.
-    & npx --yes claude-mem install --provider claude --runtime worker 2>&1 |
+    $null | & npx --yes claude-mem install --provider claude --runtime worker 2>&1 |
         Select-Object -Last 6 | ForEach-Object { Write-Host "   $_" }
 
     # THE LINE EVERYONE FORGETS. In a non-interactive terminal - which is what this
