@@ -716,8 +716,9 @@ claude_mem() {
             npx -y claude-mem start 2>&1 | tail -n 2 | sed 's/^/    /' ;;
         *)
             say '  installing claude-mem (local worker; nothing is uploaded, data stays in ~/.claude-mem).'
-            say '  If its installer asks about a cloud tier, choose the LOCAL option.'
-            npx -y claude-mem install --provider claude --runtime worker 2>&1 | tail -n 6 | sed 's/^/    /'
+            say '  no questions asked - its installer runs without a terminal.'
+            # < /dev/null: from a real terminal it shows a cloud-tier screen that tail -n 6 hides, so the run hung
+            npx -y claude-mem install --provider claude --runtime worker < /dev/null 2>&1 | tail -n 6 | sed 's/^/    /'
             # non-interactive installs skip the autostart; without a worker nothing is captured
             npx -y claude-mem start 2>&1 | tail -n 2 | sed 's/^/    /' ;;
     esac
