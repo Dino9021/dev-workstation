@@ -182,9 +182,12 @@ of a finding, image generation. What to use it for is your call.
 
 **The test (no verdict available).** It is usable when both succeed:
 `codex --version < /dev/null` prints a version, and `codex login status < /dev/null` says
-logged in. Windows: `codex` is on `PATH`. macOS: it ships inside the VS Code extension and
-its path changes on every update. So look it up each time, and write the path into the
-command itself, so that dispatch-guard's gate sees a codex call
+logged in. Windows: `codex` is on `PATH`. macOS: when the standalone install is present,
+`codex` is on `PATH` too (`~/.local/bin/codex`, a link into
+`~/.codex/packages/standalone/current/bin/codex`; measured 2026-11-22: 0.169.0, logged in,
+and the verdict's `codex:` path names it) — use plain `codex`. Without it, codex ships only
+inside the VS Code extension and its path changes on every update. So look it up each time,
+and write the path into the command itself, so that dispatch-guard's gate sees a codex call
 (`$C exec` is invisible to it):
 `"$(ls -d ~/.vscode/extensions/openai.chatgpt-*-darwin-arm64 | sort -V | tail -1)/bin/macos-aarch64/codex" exec ...`
 With the extension absent, this fails loudly with rc 127, which means not installed.
