@@ -235,6 +235,11 @@ Pitfalls already paid for — do not pay for them again:
 - A large job may outlast the shell tool's default timeout: set the tool's timeout up
   front. Real ADR-sized durations are not yet measured.
 - `-s workspace-write` only when it must write, and then only into the task folder.
+  Keep it out of the system temp folder too, which sits on the machine's own disk: add
+  `-c sandbox_workspace_write.exclude_slash_tmp=true`, and prefix the call with
+  `TMPDIR=<task folder>/scratch/codex-tmp CLANG_MODULE_CACHE_PATH=<task folder>/scratch/codex-tmp`
+  (create the folder first). Otherwise it writes compiler caches and scratch files to
+  `/tmp`. Measured on macOS; Windows is UNTESTED.
   Whether `read-only` blocks reads, or `workspace-write` can escape the folder, is not yet
   measured — check what it touched with `git status`.
 
