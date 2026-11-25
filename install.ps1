@@ -157,6 +157,11 @@ param(
     # timeout) takes C, or the first writable drive when C is not one.
     [string] $Drive = '',
     [switch] $NoUpdate,
+    # Put dispatch-guard's task scratch on a cache disk (owner, 2026-11-25: 「要」; e.g.
+    # D:\Cache\dg-scratch). Creates the folder and its marker and sets "scratch_root" in the
+    # per-machine dispatch-guard config. Left out, nothing is touched. Same as install.sh's
+    # --scratch-root; rules: dispatch-guard ADR 20261125-203407-scratch-root-on-cache-disk D3.
+    [string] $ScratchRoot = '',
     [switch] $SelfTest,
     # Probes the pinned download URLs with a HEAD request and installs nothing.
     # Separate from -SelfTest on purpose: -SelfTest must stay offline and pure, and
@@ -299,6 +304,117 @@ function Get-UpdateRunVerdict {
     if (-not $MemPresent) { return 'first' }
     if (-not $McpRegistered) { return 'first' }
     return 'update'
+}
+
+function Get-ScratchRootVerdict {
+    <#
+      'ok', or the reason -ScratchRoot is refused. The Windows half of install.sh's
+      scratch_root_verdict, by dispatch-guard ADR 20261125-203407-scratch-root-on-cache-disk
+      D3: fully qualified means a drive letter AND a root separator, so D:Cache (drive-
+      relative), \Cache (current drive) and \\server\share (UNC) are refused; a folder
+      directly at a drive root is refused (the harness cannot delete there, ADR F3); no
+      component may be named scratch or scratchpad (the plugin refuses those); and it may
+      not be inside the repository. Pure, so -SelfTest drives every branch.
+    #>
+    param([string] $Path, [string] $Repo = '')
+    $p = $Path.Replace('/', '\')
+    if ($p.StartsWith('\\')) { return 'a UNC path (\\server\...) - use a folder on a local drive' }
+    if ($p -notmatch '^[A-Za-z]:\\') { return 'not a full path - it needs a drive letter AND a backslash, e.g. D:\Cache\dg-scratch' }
+    $p = $p.TrimEnd('\')
+    $parts = @($p.Substring(3).Split('\', [StringSplitOptions]::RemoveEmptyEntries))
+    if ($parts.Count -lt 2) { return 'directly at a drive root - use a folder below it, e.g. D:\Cache\dg-scratch' }
+    foreach ($c in $parts) {
+        if (@('scratch', 'scratchpad') -contains $c.ToLowerInvariant()) {
+            return 'has a folder named scratch or scratchpad, which dispatch-guard refuses'
+        }
+    }
+    if ($Repo) {
+        $r = $Repo.Replace('/', '\').TrimEnd('\') + '\'
+        if (($p + '\').StartsWith($r, [StringComparison]::OrdinalIgnoreCase)) { return 'inside the repository' }
+    }
+    return 'ok'
+}
+
+function Set-ScratchRoot {
+    <#
+      Only with -ScratchRoot (owner, 2026-11-25: 「要」): create the folder and its marker
+      .dispatch-guard-scratch-root, and merge "scratch_root" into the per-machine
+      dispatch-guard config, other keys kept. The plugin creates none of these (ADR D3).
+      A re-run with the same path writes nothing. Then the installed plugin's own
+      hooks/scratch_root.py, run from the repository, must answer "mode": "external".
+      $ConfigPath and $Checker are parameters so -SelfTest can point them at a sandbox;
+      an empty $Checker skips the plugin's check. Returns $true on success.
+    #>
+    param([string] $Root, [string] $ConfigPath, [string] $Checker, [string] $RepoDir, [switch] $CheckOnly)
+    $sr = $Root.Replace('/', '\').TrimEnd('\')
+    $cur = ''
+    $cfg = $null
+    if (Test-Path -LiteralPath $ConfigPath) {
+        try { $cfg = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json -ErrorAction Stop }
+        catch { Write-Host "   $ConfigPath is not valid JSON - not touching it" -ForegroundColor Red; return $false }
+        if ($cfg -and $cfg.PSObject.Properties['scratch_root']) { $cur = [string] $cfg.scratch_root }
+    }
+    $marker = Join-Path $sr '.dispatch-guard-scratch-root'
+    if ($CheckOnly) {
+        Write-Host "   would create $sr and its marker .dispatch-guard-scratch-root (if missing)"
+        if ($cur -eq $sr) { Write-Host "   ${ConfigPath}: scratch_root already $sr" }
+        else { Write-Host "   would set scratch_root in $ConfigPath (now: $(if ($cur) { $cur } else { 'unset' }))" }
+        return $true
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $sr -ErrorAction Stop | Out-Null
+        if (-not (Test-Path -LiteralPath $marker)) { New-Item -ItemType File -Path $marker -ErrorAction Stop | Out-Null }
+    }
+    catch { Write-Host "   could not create $sr or its marker: $_" -ForegroundColor Red; return $false }
+    if ($cur -eq $sr) {
+        Write-Host "   scratch_root already $sr - left alone" -ForegroundColor Green
+    }
+    else {
+        if ($null -eq $cfg) { $cfg = [pscustomobject] @{} }
+        $cfg | Add-Member -NotePropertyName 'scratch_root' -NotePropertyValue $sr -Force
+        $tmp = "$ConfigPath.tmp.$PID"
+        try {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ConfigPath) -ErrorAction Stop | Out-Null
+            # ConvertTo-Json escapes the backslashes; written to a temp file, then moved, so a
+            # failed write never leaves a half config behind.
+            [IO.File]::WriteAllText($tmp, ($cfg | ConvertTo-Json -Depth 20) + "`n", [Text.UTF8Encoding]::new($false))
+            Move-Item -LiteralPath $tmp -Destination $ConfigPath -Force -ErrorAction Stop
+        }
+        catch {
+            Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+            Write-Host "   could not write ${ConfigPath}: $_" -ForegroundColor Red
+            return $false
+        }
+        Write-Host "   scratch_root set to $sr in $ConfigPath (was: $(if ($cur) { $cur } else { 'unset' }))" -ForegroundColor Green
+    }
+    if (-not $Checker) {
+        Write-Host "   installed dispatch-guard is older than 0.83.0 - its own check is skipped" -ForegroundColor Yellow
+        return $true
+    }
+    Push-Location -LiteralPath $RepoDir
+    try { $out = (& python -I $Checker 2>&1 | Out-String) } finally { Pop-Location }
+    if ($out -match '"mode":\s*"external"') {
+        Write-Host "   verified: dispatch-guard resolves it (mode external)" -ForegroundColor Green
+        return $true
+    }
+    Write-Host "   dispatch-guard does NOT accept it: $out" -ForegroundColor Red
+    return $false
+}
+
+function Get-ScratchRootChecker {
+    # The newest installed dispatch-guard's hooks/scratch_root.py, or '' (older than 0.83.0).
+    $base = Join-Path $env:USERPROFILE '.claude\plugins\cache\dispatch-guard\dispatch-guard'
+    if (-not (Test-Path -LiteralPath $base)) { return '' }
+    $best = Get-ChildItem -LiteralPath $base -Directory |
+        Where-Object { ($_.Name -as [version]) -and (Test-Path -LiteralPath (Join-Path $_.FullName 'hooks\scratch_root.py')) } |
+        Sort-Object { [version] $_.Name } | Select-Object -Last 1
+    if ($best) { return (Join-Path $best.FullName 'hooks\scratch_root.py') }
+    return ''
+}
+
+function Get-ScratchRootConfigPath {
+    $dir = if ($env:CLAUDE_DISPATCH_DIR) { $env:CLAUDE_DISPATCH_DIR } else { Join-Path $env:USERPROFILE '.claude\dispatch-guard' }
+    return (Join-Path $dir 'config.json')
 }
 
 function Test-GraphServersRegistered {
@@ -3219,6 +3335,47 @@ function Invoke-SelfTest {
         Check "$n is administrator-only AND optional" (($row.NeedsAdmin -eq $true) -and ($row.Optional -eq $true))
     }
 
+    # ---------------------------------------------- -ScratchRoot (install.sh scratch_root_verdict)
+    # Each refusal beside the lookalike that must pass, so a verdict that refuses everything
+    # or nothing fails here.
+    Check 'scratch root: a folder below a drive root is ok' ((Get-ScratchRootVerdict 'D:\Cache\dg-scratch') -eq 'ok')
+    Check 'scratch root: a trailing backslash is the same folder' ((Get-ScratchRootVerdict 'D:\Cache\dg-scratch\') -eq 'ok')
+    Check 'scratch root: forward slashes are accepted' ((Get-ScratchRootVerdict 'D:/Cache/dg-scratch') -eq 'ok')
+    Check 'scratch root: drive-relative D:Cache is refused' ((Get-ScratchRootVerdict 'D:Cache\dg') -match 'full path')
+    Check 'scratch root: current-drive \Cache is refused' ((Get-ScratchRootVerdict '\Cache\dg') -match 'full path')
+    Check 'scratch root: a relative path is refused' ((Get-ScratchRootVerdict 'Cache\dg') -match 'full path')
+    Check 'scratch root: UNC is refused' ((Get-ScratchRootVerdict '\\server\share\dg') -match 'UNC')
+    Check 'scratch root: directly at a drive root is refused' ((Get-ScratchRootVerdict 'D:\dg-scratch') -match 'drive root')
+    Check 'scratch root: the drive root itself is refused' ((Get-ScratchRootVerdict 'D:\') -ne 'ok')
+    Check 'scratch root: a folder named Scratch (any case) is refused' ((Get-ScratchRootVerdict 'D:\Scratch\dg') -match 'scratch or scratchpad')
+    Check 'scratch root: scratchpad is refused' ((Get-ScratchRootVerdict 'D:\Cache\scratchpad') -match 'scratch or scratchpad')
+    Check 'scratch root: dg-scratch (a substring) is not a folder named scratch' ((Get-ScratchRootVerdict 'D:\dg-scratch\x') -eq 'ok')
+    Check 'scratch root: inside the repository is refused' `
+        ((Get-ScratchRootVerdict 'D:\WorkSpace\dw\cache' 'D:\WorkSpace\dw') -match 'inside the repository')
+    Check 'scratch root: a sibling of the repository is not inside it' `
+        ((Get-ScratchRootVerdict 'D:\WorkSpace\dw2\cache' 'D:\WorkSpace\dw') -eq 'ok')
+    # The impure half in a throwaway box: folder + marker created, other keys kept, path
+    # written with escaped backslashes, and a second run changes nothing.
+    $srBox = Join-Path ([IO.Path]::GetTempPath()) ("sr-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        New-Item -ItemType Directory -Path $srBox | Out-Null
+        $srCfg = Join-Path $srBox 'config.json'
+        Set-Content -LiteralPath $srCfg -Value '{ "keep": 1, "dispatch": { "x": "y" } }'
+        $srRoot = Join-Path $srBox 'cache\dg'
+        $r1 = Set-ScratchRoot -Root $srRoot -ConfigPath $srCfg -Checker '' -RepoDir $srBox 6>$null
+        $after1 = Get-Content -LiteralPath $srCfg -Raw
+        $r2 = Set-ScratchRoot -Root $srRoot -ConfigPath $srCfg -Checker '' -RepoDir $srBox 6>$null
+        $after2 = Get-Content -LiteralPath $srCfg -Raw
+        $j = $after1 | ConvertFrom-Json
+        Check 'scratch root: folder and marker created' (Test-Path -LiteralPath (Join-Path $srRoot '.dispatch-guard-scratch-root'))
+        Check 'scratch root: merged into config, other keys kept' `
+            (($j.scratch_root -eq $srRoot) -and ($j.keep -eq 1) -and ($j.dispatch.x -eq 'y'))
+        Check 'scratch root: the backslashes are escaped in the file' ($after1.Contains($srRoot.Replace('\', '\\')))
+        Check 'scratch root: both runs report success' (($r1 -eq $true) -and ($r2 -eq $true))
+        Check 'scratch root: a re-run changes nothing' ($after1 -ceq $after2)
+    }
+    finally { Remove-Item -LiteralPath $srBox -Recurse -Force -ErrorAction SilentlyContinue }
+
     # ---------------------------------------------- the exit-code hints
     Check 'hint: 1601 says administrator' ((Get-InstallExitHint 1601) -match 'administrator')
     Check 'hint: 5 says administrator' ((Get-InstallExitHint 5) -match 'administrator')
@@ -3379,6 +3536,17 @@ if (-not (Test-IsWindowsHost $script:isWindowsVar ([Environment]::OSVersion.Plat
     Write-Host "   -SelfTest and -CheckUrls still run here: both are pure and offline."
     Write-Host ""
     exit 2
+}
+
+# -ScratchRoot is refused here, before anything is installed or logged - as install.sh does.
+# The inside-the-repository check runs again in its phase, once the repository is final.
+if ($ScratchRoot) {
+    $srVerdict = Get-ScratchRootVerdict $ScratchRoot
+    if ($srVerdict -ne 'ok') {
+        Write-Host "-ScratchRoot $ScratchRoot refused: $srVerdict" -ForegroundColor Red
+        Write-Host "   Nothing has been installed, changed, or written."
+        exit 2
+    }
 }
 
 if ($LogPath) { $script:logFile = $LogPath }
@@ -4453,6 +4621,11 @@ if ($CheckOnly) {
     Write-Host "   reply language - the owner's Traditional Chinese rule:" -ForegroundColor Yellow
     & pwsh -NoProfile -ExecutionPolicy Bypass -File $replyLang -CheckOnly 2>&1 |
         ForEach-Object { Write-Host $_ }
+    if ($ScratchRoot) {
+        Write-Host ""
+        Write-Host "   task scratch on the cache disk (-ScratchRoot):" -ForegroundColor Yellow
+        Set-ScratchRoot -Root $ScratchRoot -ConfigPath (Get-ScratchRootConfigPath) -Checker '' -RepoDir $Repo -CheckOnly | Out-Null
+    }
     Write-Host "CHECK ONLY: nothing was installed or written apart from the log below." -ForegroundColor Yellow
     Write-Host "Re-run without -CheckOnly to carry the plan out." -ForegroundColor Yellow
     Stop-Run 0
@@ -4516,6 +4689,23 @@ if ($script:replyLangExit -ne 0) {
     Write-Host ""
     Write-Host "reply-language/install.ps1 exited $($script:replyLangExit) - that rule is NOT in" -ForegroundColor Yellow
     Write-Host "place. Nothing else in this run depends on it; read its output above." -ForegroundColor Yellow
+}
+
+# ------------------------------------------- phase 4c: task scratch on the cache disk
+# Only with -ScratchRoot. Not fatal, like the reply-language rule: without it dispatch-guard
+# keeps task scratch inside the repository, which still works. Reported again in the summary.
+$script:scratchOk = $null
+if ($ScratchRoot) {
+    Write-Phase "Task scratch on the cache disk (dispatch-guard scratch_root)"
+    $srVerdict = Get-ScratchRootVerdict $ScratchRoot $Repo
+    if ($srVerdict -ne 'ok') {
+        Write-Host "   -ScratchRoot $ScratchRoot refused: $srVerdict" -ForegroundColor Red
+        $script:scratchOk = $false
+    }
+    else {
+        $script:scratchOk = Set-ScratchRoot -Root $ScratchRoot -ConfigPath (Get-ScratchRootConfigPath) `
+            -Checker (Get-ScratchRootChecker) -RepoDir $Repo
+    }
 }
 
 # ------------------------------------------------------------ what is left for you
@@ -4742,6 +4932,10 @@ if ($null -ne $script:replyLangExit) {
     else {
         Write-Host "   reply language:             FAILED (exit $($script:replyLangExit)) - the rule is NOT in place" -ForegroundColor Yellow
     }
+}
+if ($null -ne $script:scratchOk) {
+    if ($script:scratchOk) { Write-Host "   task scratch:               $ScratchRoot" -ForegroundColor Green }
+    else { Write-Host "   task scratch:               FAILED - see the scratch phase above" -ForegroundColor Yellow }
 }
 # ⛔ THE THING PEOPLE ACTUALLY GET CAUGHT BY, and until 2026-10-14 this script never said
 # it. Half of what it installs is PER-USER, and it lands in the profile of whoever RAN it.

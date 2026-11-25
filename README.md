@@ -302,6 +302,7 @@ macOS 的 `install.sh` 用同一套判定，兩邊行為一致。
 | `-Cowork yes` / `-Cowork no` | 直接回答「要不要裝 claude-mem Cowork」，腳本就不會問。見下方說明 |
 | `-NoUpdate` | 不要先把這份 clone 快轉到最新。預設會更新；正在測試未提交的改動、或要釘住版本的時候加這個 |
 | `-Portable yes` / `-Portable no` | 直接回答「沒有管理員權限時要不要用可攜版 PowerShell 7 / Node.js」。不給就是問，而「問不到」等於 no |
+| `-ScratchRoot <路徑>` | 任務暫存檔放到快取碟（dispatch-guard 0.83.0+），例如 `-ScratchRoot D:\Cache\dg-scratch`：建資料夾與標記檔，寫進 dispatch-guard 的本機設定；不加就什麼都不動。路徑要有磁碟代號和 `\`，不能直接在磁碟根目錄下、不能在專案裡、不能有叫 scratch 的資料夾 |
 | `-SelfTest` | 離線自我測試，不碰任何東西，連 log 都不寫 |
 | `-CheckUrls` | 檢查釘住的下載網址是否還活著 |
 
@@ -824,6 +825,7 @@ behind `-All`, and that flag is gone. Passing it does nothing and the script say
 | `-Cowork yes` / `-Cowork no` | Answers the one question up front, so the script does not ask. See below |
 | `-NoUpdate` | Do not fast-forward this clone first. Updating is the default; pass this when testing an uncommitted change, or to pin a version |
 | `-Portable yes` / `-Portable no` | Answers "use portable PowerShell 7 / Node.js when you have no administrator rights?" up front. Left out, it asks, and anything that cannot be asked counts as no |
+| `-ScratchRoot <path>` | Put task scratch on a cache disk (dispatch-guard 0.83.0+), e.g. `-ScratchRoot D:\Cache\dg-scratch`: creates the folder and its marker and sets `scratch_root` in the per-machine dispatch-guard config; without it nothing is touched. The path needs a drive letter and `\`, and must not sit directly at a drive root, inside the repository, or under a folder named scratch |
 | `-SelfTest` | Offline self-test. Touches nothing, not even the log |
 | `-CheckUrls` | Are the pinned download URLs still alive? |
 
