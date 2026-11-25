@@ -65,6 +65,10 @@ curl -fsSLo /tmp/install.sh https://raw.githubusercontent.com/Dino9021/dev-works
   (`~/.local`), VS Code into `/Applications`.
 - 只看不裝 / report only: `sh install.sh --check-only`　·　不互動 / unattended:
   `sh install.sh --cowork no`
+- 任務暫存檔放到快取碟 / task scratch on a cache disk (dispatch-guard 0.83.0+):
+  `sh install.sh --scratch-root ~/.cache/dg-scratch` — 建資料夾與標記檔，寫進 dispatch-guard 的
+  本機設定；不加就什麼都不動。/ creates the folder and its marker and sets `scratch_root` in the
+  per-machine dispatch-guard config; without it nothing is touched.
 - 已經裝過的機器再跑一次就是更新，什麼都不問：Cowork 維持原狀（要改用 `--cowork yes|no`）。
   判定是三項都成立：這份 clone 在 `~/WorkSpace` 裡、claude-mem 已安裝、兩個圖譜伺服器已註冊。/
   On an installed machine a re-run is an update and asks nothing; Cowork stays as it is

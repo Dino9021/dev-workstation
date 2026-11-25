@@ -191,6 +191,10 @@ and write the path into the command itself, so that dispatch-guard's gate sees a
 (`$C exec` is invisible to it):
 `"$(ls -d ~/.vscode/extensions/openai.chatgpt-*-darwin-arm64 | sort -V | tail -1)/bin/macos-aarch64/codex" exec ...`
 With the extension absent, this fails loudly with rc 127, which means not installed.
+⚠ `login status` saying "Logged in" does not prove that Codex works. Measured
+2026-11-25 on Windows: it said "Logged in" while every call failed with 401
+`token_revoked`, and the verdict said `UNAVAILABLE not-logged-in`. Trust the verdict, or
+a real call.
 
 **The loop (no verdict available) — never stop work for it, and never install it or log
 it in yourself:**
@@ -237,12 +241,18 @@ Pitfalls already paid for — do not pay for them again:
   by codepoint). A long prompt as an argument on Windows is UNTESTED — use the file.
 - A large job may outlast the shell tool's default timeout: set the tool's timeout up
   front. Real ADR-sized durations are not yet measured.
-- `-s workspace-write` only when it must write, and then only into the task folder.
-  Keep it out of the system temp folder too, which sits on the machine's own disk: add
-  `-c sandbox_workspace_write.exclude_slash_tmp=true`, and prefix the call with
-  `TMPDIR=<task folder>/scratch/codex-tmp CLANG_MODULE_CACHE_PATH=<task folder>/scratch/codex-tmp`
+- `-s workspace-write` only when it must write, and then only into the task folder or the
+  task's scratch folder (the dispatch-guard SessionStart note names it; when it is outside
+  the task folder, add `--add-dir <that folder>` — measured: only the added folder becomes
+  writable). Keep it out of the system temp folder too, which sits on the machine's own
+  disk: add `-c sandbox_workspace_write.exclude_slash_tmp=true`, and prefix the call with
+  `TMPDIR=<task scratch folder>/codex-tmp CLANG_MODULE_CACHE_PATH=<task scratch folder>/codex-tmp`
   (create the folder first). Otherwise it writes compiler caches and scratch files to
-  `/tmp`. Measured on macOS; Windows is UNTESTED.
+  `/tmp`. Measured on macOS. **Windows** has no `TMPDIR`: prefix with
+  `TEMP=<task scratch folder>\codex-tmp TMP=<task scratch folder>\codex-tmp` instead.
+  This was measured 2026-11-25 on codex-cli 0.170.0: the `-c` flag is accepted, Codex
+  sees both variables, and a file written to its temp path landed there, not in the
+  system temp folder. `--add-dir` is still UNTESTED on Windows.
   Whether `read-only` blocks reads, or `workspace-write` can escape the folder, is not yet
   measured — check what it touched with `git status`.
 

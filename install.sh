@@ -517,6 +517,28 @@ self_test() {
     t 'update run: no graph servers is a first install' "$(is "$(update_run_verdict /h/WorkSpace/dw /h/WorkSpace yes no)" first)"
     t 'update run: a clone outside WorkSpace is a first install' "$(is "$(update_run_verdict /h/Downloads/dw /h/WorkSpace yes yes)" first)"
     t 'update run: a sibling named WorkSpace2 is not inside WorkSpace' "$(is "$(update_run_verdict /h/WorkSpace2/dw /h/WorkSpace yes yes)" first)"
+    t 'scratch root: a folder on the cache disk is ok' "$(is "$(scratch_root_verdict /Users/u/.cache/dg-scratch)" ok)"
+    t 'scratch root: a trailing slash is the same folder' "$(is "$(scratch_root_verdict /Users/u/.cache/dg-scratch/)" ok)"
+    t 'scratch root: relative is refused' "$(scratch_root_verdict cache/dg | grep -q 'not an absolute'; echo $?)"
+    t 'scratch root: directly under / is refused' "$(scratch_root_verdict /dg-scratch | grep -q 'directly under /'; echo $?)"
+    t 'scratch root: / itself is refused' "$([ "$(scratch_root_verdict /)" != ok ]; echo $?)"
+    t 'scratch root: directly under a volume root is refused' "$(scratch_root_verdict /Volumes/Cache/dg | grep -q 'volume root'; echo $?)"
+    t 'scratch root: below a volume root is ok' "$(is "$(scratch_root_verdict /Volumes/Cache/c/dg)" ok)"
+    t 'scratch root: a folder named Scratch (any case) is refused' "$(scratch_root_verdict /Users/u/Scratch/dg | grep -q 'scratch or scratchpad'; echo $?)"
+    t 'scratch root: scratchpad is refused' "$(scratch_root_verdict /Users/u/.cache/scratchpad | grep -q 'scratch or scratchpad'; echo $?)"
+    t 'scratch root: dg-scratch (a substring) is not a folder named scratch' "$(is "$(scratch_root_verdict /Users/u/dg-scratch/x)" ok)"
+    t 'scratch root: inside the repository is refused' "$(scratch_root_verdict /w/dw/cache /w/dw | grep -q 'inside the repository'; echo $?)"
+    t 'scratch root: a sibling of the repository is not inside it' "$(is "$(scratch_root_verdict /w/dw2/cache /w/dw)" ok)"
+    sr_box=$(mktemp -d "${TMPDIR:-/tmp}/sr-test.XXXXXX")
+    printf '{ "keep": 1, "dispatch": { "x": "y" } }\n' >"$sr_box/config.json"
+    ( CLAUDE_DISPATCH_DIR=$sr_box HOME=$sr_box/home; export CLAUDE_DISPATCH_DIR HOME
+      scratch_root=$sr_box/cache/dg; repo=$sr_box/repo; mode=install; mkdir -p "$repo"
+      setup_scratch_root >/dev/null; cp "$sr_box/config.json" "$sr_box/after1"; setup_scratch_root >/dev/null )
+    t 'scratch root: folder and marker created' "$([ -f "$sr_box/cache/dg/.dispatch-guard-scratch-root" ]; echo $?)"
+    t 'scratch root: merged into config, other keys kept' "$(/usr/bin/jq -e --arg p "$sr_box/cache/dg" '.scratch_root == $p and .keep == 1 and .dispatch.x == "y"' "$sr_box/config.json" >/dev/null; echo $?)"
+    t 'scratch root: a re-run changes nothing' "$(cmp -s "$sr_box/config.json" "$sr_box/after1"; echo $?)"
+    rm -rf "$sr_box"
+
     t 'update run: the WorkSpace folder itself is not inside it' "$(is "$(update_run_verdict /h/WorkSpace /h/WorkSpace yes yes)" first)"
     t 'update run: no WorkSpace folder is a first install' "$(is "$(update_run_verdict /h/WorkSpace/dw '' yes yes)" first)"
 
@@ -643,6 +665,63 @@ update_run() {
     [ "$(update_run_verdict "$(cd "$here" && pwd -P)" "$ws" "$mem" "$mcp")" = update ]
 }
 
+# scratch_root_verdict PATH [REPO] -> ok | the reason it is refused
+# dispatch-guard 0.83.0 puts a task's scratch under scratch_root (its ADR
+# 20261125-203407-scratch-root-on-cache-disk, D3/D8). Refused here: not absolute; directly under
+# / or under a volume root (/Volumes/<disk>/x); a folder named scratch or scratchpad anywhere in
+# it (the plugin refuses that too); inside the repository.
+scratch_root_verdict() {
+    p=$(printf '%s' "$1" | sed 's:/*$::')
+    case $p in /*) ;; *) echo 'not an absolute path'; return ;; esac
+    case $p in /*/*) ;; *) echo 'directly under / - use a folder below it, e.g. ~/.cache/dg-scratch'; return ;; esac
+    case $p in /Volumes/*/*/*) ;; /Volumes/*/*) echo 'directly under a volume root - use a folder below it'; return ;; esac
+    if printf '%s\n' "$p" | tr '/' '\n' | tr 'A-Z' 'a-z' | grep -qxE 'scratch|scratchpad'; then
+        echo 'has a folder named scratch or scratchpad, which dispatch-guard refuses'; return
+    fi
+    if [ -n "$2" ]; then case "$p/" in "$2"/*) echo 'inside the repository'; return ;; esac; fi
+    echo ok
+}
+
+# Only with --scratch-root: the folder, its marker file, and "scratch_root" merged into the
+# per-machine dispatch-guard config (owner, 2026-11-25: 「要」). The plugin creates none of these.
+# Without the option nothing is touched. A re-run with the same path changes nothing.
+setup_scratch_root() {
+    [ -n "$scratch_root" ] || return 0
+    phase 'Task scratch on the cache disk (dispatch-guard scratch_root)'
+    sr=$(printf '%s' "$scratch_root" | sed 's:/*$::')
+    v=$(scratch_root_verdict "$sr" "$(cd "$repo" && pwd -P)")
+    [ "$v" = ok ] || { say "  --scratch-root $sr refused: $v"; return 1; }
+    sdir=${CLAUDE_DISPATCH_DIR:-$HOME/.claude/dispatch-guard}; cfg=$sdir/config.json
+    cur=''
+    if [ -f "$cfg" ]; then
+        cur=$(/usr/bin/jq -r '.scratch_root // empty' "$cfg") || { say "  $cfg is not valid JSON - not touching it"; return 1; }
+    fi
+    if [ "$mode" = check ]; then
+        say "  would create $sr and its marker .dispatch-guard-scratch-root (if missing)"
+        [ "$cur" = "$sr" ] && say "  $cfg: scratch_root already $sr" || say "  would set scratch_root in $cfg (now: ${cur:-unset})"
+        return 0
+    fi
+    mkdir -p "$sr" || { say "  could not create $sr"; return 1; }
+    [ -e "$sr/.dispatch-guard-scratch-root" ] || : >"$sr/.dispatch-guard-scratch-root" || return 1
+    if [ "$cur" = "$sr" ]; then
+        say "  scratch_root already $sr - left alone"
+    else
+        mkdir -p "$sdir" || return 1
+        [ -f "$cfg" ] || printf '{}\n' >"$cfg" || return 1
+        /usr/bin/jq --arg p "$sr" '.scratch_root = $p' "$cfg" >"$cfg.tmp.$$" && mv "$cfg.tmp.$$" "$cfg" \
+            || { rm -f "$cfg.tmp.$$"; say "  could not write $cfg"; return 1; }
+        say "  scratch_root set to $sr in $cfg (was: ${cur:-unset})"
+    fi
+    chk=$(for f in "$HOME"/.claude/plugins/cache/dispatch-guard/dispatch-guard/*/hooks/scratch_root.py; do
+        [ -f "$f" ] && printf '%s\n' "$f"; done | sort -V | tail -n 1)
+    if [ -z "$chk" ]; then say '  installed dispatch-guard is older than 0.83.0 - its own check is skipped'; return 0; fi
+    out=$(cd "$repo" && python3 -I "$chk" 2>&1)
+    case $out in
+        *'"mode": "external"'*) say '  verified: dispatch-guard resolves it (mode external)' ;;
+        *) say "  dispatch-guard does NOT accept it: $out"; return 1 ;;
+    esac
+}
+
 ask_cowork() {
     # claude-mem Cowork streams tool use to cmem.ai, so it is never installed without a
     # decision. Asked once, here, before anything is installed. No terminal = no.
@@ -766,11 +845,12 @@ plugins() {
 
 usage() {
     say 'usage: sh install.sh [--check-only] [--self-test] [--no-update] [--pdg]'
-    say '                     [--cowork yes|no] [--repo PATH]'
+    say '                     [--cowork yes|no] [--repo PATH] [--scratch-root PATH]'
+    say '  --scratch-root PATH  put dispatch-guard task scratch on a cache disk, e.g. ~/.cache/dg-scratch'
 }
 
 main() {
-    mode=install; no_update=0; pdg=0; cowork=''; repo_arg=''; row=''
+    mode=install; no_update=0; pdg=0; cowork=''; repo_arg=''; row=''; scratch_root=''
     # Parsed WITHOUT shift, so "$@" is still intact for the bootstrap's hand-over - a
     # re-split string would break a --repo path that holds a space.
     takes=''
@@ -779,6 +859,7 @@ main() {
             cowork) cowork=$a; takes=''; continue ;;
             repo) repo_arg=$a; takes=''; continue ;;
             row) row=$a; takes=''; continue ;;
+            scratch-root) scratch_root=$a; takes=''; continue ;;
         esac
         case $a in
             --check-only) mode=check ;;
@@ -787,6 +868,7 @@ main() {
             --pdg) pdg=1 ;;
             --cowork) takes=cowork ;;
             --repo) takes=repo ;;
+            --scratch-root) takes=scratch-root ;;
             --install-row) mode=row; takes=row ;;
             -h|--help) usage; exit 0 ;;
             *) say "install.sh: unknown argument: $a"; usage; exit 2 ;;
@@ -794,6 +876,11 @@ main() {
     done
     [ -z "$takes" ] || { say "install.sh: --$takes needs a value"; exit 2; }
     case $cowork in ''|yes|no) ;; *) say '--cowork takes yes or no'; exit 2 ;; esac
+    # refused before anything is installed; the inside-the-repository check runs once the repo is known
+    if [ -n "$scratch_root" ]; then
+        v=$(scratch_root_verdict "$scratch_root")
+        [ "$v" = ok ] || { say "--scratch-root $scratch_root refused: $v"; exit 2; }
+    fi
 
     if [ "$mode" = selftest ]; then
         self_test
@@ -867,6 +954,7 @@ main() {
         plugins
         phase 'Reply language (reply-language/install.sh --check-only)'
         sh "$here/reply-language/install.sh" --check-only
+        setup_scratch_root
         say ''
         say 'CHECK ONLY: nothing was installed or written.'
         exit 0
@@ -884,6 +972,9 @@ main() {
     sh "$here/reply-language/install.sh"
     lang_rc=$?
 
+    scratch_rc=0
+    setup_scratch_root || scratch_rc=1
+
     mem_failed=0
     claude_mem
 
@@ -899,6 +990,9 @@ main() {
     [ -z "$skipped$still" ] && say 'toolchain  : complete'
     [ $graph_rc = 0 ] && say 'graph      : every step ok' || say 'graph      : a step FAILED - see its summary above'
     [ $lang_rc = 0 ] && say 'language   : 正體中文 rule in place' || say 'language   : FAILED - see the Reply language phase above'
+    if [ -n "$scratch_root" ]; then
+        [ $scratch_rc = 0 ] && say "scratch    : $scratch_root" || say 'scratch    : FAILED - see the scratch phase above'
+    fi
     [ $mem_failed = 0 ] && say 'claude-mem : worker running' || say 'claude-mem : worker NOT running'
     [ -n "$plugin_failed" ] && say "plugins    : NOT installed: $plugin_failed" || say 'plugins    : installed'
     [ -n "$ext_failed" ] && say "extensions : NOT installed:$ext_failed"
